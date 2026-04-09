@@ -8,6 +8,11 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 from datetime import datetime
+import pytz
+
+def now_et():
+    et = pytz.timezone("America/New_York")
+    return datetime.now(et).strftime("%I:%M %p ET")
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -16,6 +21,21 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ── Auto-refresh ────────────────────────────────────────────────────────────────
+from streamlit_autorefresh import st_autorefresh
+# Refresh options in sidebar
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    refresh_mins = st.selectbox(
+        "Auto-refresh interval",
+        [5, 10, 15, 30, 60, 0],
+        index=2,
+        format_func=lambda x: f"Every {x} min" if x > 0 else "Off"
+    )
+    if refresh_mins > 0:
+        st_autorefresh(interval=refresh_mins * 60 * 1000, key="golf_refresh")
+        st.caption(f"🔄 Refreshing every {refresh_mins} min")
 
 # ── Theme / CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -437,8 +457,8 @@ with c4:
     ) if matchups else 0
     st.markdown(f"""<div class="metric-card">
         <div class="label">Last Synced</div>
-        <div class="value" style="font-size:1rem">{datetime.now().strftime("%I:%M %p")}</div>
-        <div class="sub">{datetime.now().strftime("%b %d, %Y")} · {h2h_sharp} H2H sharp plays</div>
+        <div class="value" style="font-size:1rem">{now_et()}</div>
+        <div class="sub">{datetime.now(pytz.timezone("America/New_York")).strftime("%b %d, %Y")} · {h2h_sharp} H2H sharp plays</div>
     </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
