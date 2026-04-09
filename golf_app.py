@@ -7,12 +7,13 @@ Run locally: streamlit run golf_app.py
 import streamlit as st
 import pandas as pd
 from supabase import create_client
-from datetime import datetime
-import pytz
+from datetime import datetime, timezone, timedelta
 
 def now_et():
-    et = pytz.timezone("America/New_York")
-    return datetime.now(et).strftime("%I:%M %p ET")
+    utc_now = datetime.now(timezone.utc)
+    # EDT = UTC-4, EST = UTC-5. April = EDT
+    et_now = utc_now - timedelta(hours=4)
+    return et_now.strftime("%I:%M %p ET")
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -458,20 +459,23 @@ with c4:
     st.markdown(f"""<div class="metric-card">
         <div class="label">Last Synced</div>
         <div class="value" style="font-size:1rem">{now_et()}</div>
-        <div class="sub">{datetime.now(pytz.timezone("America/New_York")).strftime("%b %d, %Y")} · {h2h_sharp} H2H sharp plays</div>
+        <div class="sub">{(datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%b %d, %Y")} · {h2h_sharp} H2H sharp plays</div>
     </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📊 Tournament Forecast",
     "💰 Finish Odds + Edge",
     "⚔️ H2H Matchup Tool",
     "🎯 Best H2H Plays",
+    "🏆 Live Leaderboard",
+    "📝 Results Tracker",
     "📈 Skill Ratings",
     "🏌️ Course History",
     "🔴 Live Matchups",
+    "⚙️ Auto Scheduler",
 ])
 
 # ════════════════════════════════════════════════════════════
@@ -908,10 +912,290 @@ with tab4:
         </div>""", unsafe_allow_html=True)
 
 
+
+
 # ════════════════════════════════════════════════════════════
-# TAB 5 — SKILL RATINGS
+# TAB 5 — LIVE LEADERBOARD
 # ════════════════════════════════════════════════════════════
 with tab5:
+    st.markdown('<div class="section-header">🏆 Live Leaderboard — Masters Tournament</div>', unsafe_allow_html=True)
+
+    @st.cache_data(ttl=60)
+    def load_live():
+        sb = get_supabase()
+        return sb.table("live_predictions").select("*").order("current_pos").execute().data
+
+    live = load_live()
+
+    if live and any(p.get("current_pos") for p in live):
+        st.markdown("""<div class="info-box">
+            Live scoring updates every 60 seconds · Win% = DG in-play model probability ·
+            Run <code>py golf_sync.py --mode live</code> to push latest scores
+        </div>""", unsafe_allow_html=True)
+
+        lb_rows = []
+        for p in live:
+            pos   = p.get("current_pos")
+            score = p.get("current_score")
+            thru  = p.get("thru")
+            win   = (p.get("win_prob") or 0) * 100
+            t5    = (p.get("top5_prob") or 0) * 100
+            t10   = (p.get("top10_prob") or 0) * 100
+            cut   = (p.get("make_cut_prob") or 0) * 100
+
+            # Find player's pre-tournament win prob for comparison
+            fp = next((x for x in field_players if x["name"] == p.get("player_name")), {})
+            pre_win = fp.get("bl_win") or 0
+
+            lb_rows.append({
+                "Pos":        pos or "—",
+                "Player":     p.get("player_name",""),
+                "Score":      score,
+                "Thru":       thru if thru and thru < 18 else "F",
+                "Win%":       round(win, 2),
+                "Pre Win%":   round(pre_win, 2),
+                "Win Δ":      round(win - pre_win, 2),
+                "Top 5%":     round(t5, 2),
+                "Top 10%":    round(t10, 2),
+                "Make Cut%":  round(cut, 2),
+            })
+
+        df_lb = pd.DataFrame(lb_rows)
+
+        def color_score(val):
+            if isinstance(val, (int, float)):
+                if val < 0: return "color:#69f0ae; font-weight:600"
+                if val > 2: return "color:#ef9a9a"
+            return ""
+        def color_delta(val):
+            if isinstance(val, (int, float)):
+                if val > 2:  return "color:#69f0ae; font-weight:600"
+                if val < -2: return "color:#ef9a9a"
+            return ""
+
+        styled_lb = df_lb.style\
+            .map(color_score, subset=["Score"])\
+            .map(color_delta, subset=["Win Δ"])\
+            .format({
+                "Score":     "{:+d}",
+                "Win%":      "{:.2f}%",
+                "Pre Win%":  "{:.2f}%",
+                "Win Δ":     "{:+.2f}%",
+                "Top 5%":    "{:.2f}%",
+                "Top 10%":   "{:.2f}%",
+                "Make Cut%": "{:.2f}%",
+            }, na_rep="—")
+
+        st.dataframe(styled_lb, use_container_width=True, hide_index=True, height=600)
+
+        st.markdown("""<div class="info-box">
+            <b>Win Δ</b> = Live win probability minus pre-tournament probability ·
+            🟢 Green = model upgrading player · 🔴 Red = model downgrading
+        </div>""", unsafe_allow_html=True)
+    else:
+        st.markdown("""<div class="info-box">
+            ⏳ Live leaderboard populates once Round 1 begins Thursday morning.<br>
+            Run <code>py golf_sync.py --mode live</code> during the round to push live scores.
+            The leaderboard will show current position, score, holes completed, and
+            updated win/top5/top10/cut probabilities from the DataGolf live model.
+        </div>""", unsafe_allow_html=True)
+
+        # Show pre-tournament order as preview
+        st.markdown('<div class="section-header">Pre-Tournament Probability Order</div>', unsafe_allow_html=True)
+        prev_rows = [{
+            "Player":    p["name"],
+            "DG Rank":   p["dg_rank"] or "NR",
+            "Win%":      round(p["bl_win"] or 0, 2),
+            "Top 5%":    round(p["bl_top5"] or 0, 2),
+            "Top 10%":   round(p["bl_top10"] or 0, 2),
+            "Make Cut%": round(p["bl_cut"] or 0, 2),
+        } for p in field_players if p.get("bl_win")]
+        df_prev = pd.DataFrame(prev_rows).sort_values("Win%", ascending=False)
+        st.dataframe(df_prev.style.format({
+            "Win%": "{:.2f}%", "Top 5%": "{:.2f}%",
+            "Top 10%": "{:.2f}%", "Make Cut%": "{:.2f}%",
+        }, na_rep="—"), use_container_width=True, hide_index=True, height=500)
+
+
+# ════════════════════════════════════════════════════════════
+# TAB 6 — RESULTS TRACKER
+# ════════════════════════════════════════════════════════════
+with tab6:
+    st.markdown('<div class="section-header">📝 Results Tracker — Log & Track Bets</div>', unsafe_allow_html=True)
+
+    # ── Log a new bet ──────────────────────────────────────────
+    st.markdown('<div class="section-header">Log a Bet</div>', unsafe_allow_html=True)
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        bet_player  = st.selectbox("Player", [p["name"] for p in field_players], key="bt_player")
+        bet_market  = st.selectbox("Market", ["Win","Top 5","Top 10","Top 20","Make Cut","H2H"], key="bt_market")
+        bet_side    = st.text_input("Side / Bet Description", placeholder="e.g. Scheffler to Win", key="bt_side")
+    with col_b:
+        bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","Fanatics","Hard Rock","theScore"], key="bt_book")
+        bet_odds    = st.number_input("Odds (American)", value=-110, step=5, key="bt_odds")
+        bet_stake   = st.number_input("Stake ($)", value=10.0, step=5.0, key="bt_stake")
+    with col_c:
+        bet_edge    = st.number_input("Edge % at time of bet", value=0.0, step=0.1, key="bt_edge")
+        bet_round   = st.selectbox("Round", ["Pre-Tournament","R1","R2","R3","R4"], key="bt_round")
+        bet_notes   = st.text_area("Notes", placeholder="Why this bet?", height=68, key="bt_notes")
+
+    if st.button("➕ Log Bet", key="log_btn"):
+        try:
+            sb = get_supabase()
+            # Calculate implied prob and to-win amount
+            odds = float(bet_odds)
+            imp  = round((100/(odds+100)*100) if odds > 0 else (abs(odds)/(abs(odds)+100)*100), 2)
+            win_amt = round((bet_stake * odds / 100) if odds > 0 else (bet_stake * 100 / abs(odds)), 2)
+            row = {
+                "player_name": bet_player,
+                "market":      bet_market,
+                "side":        bet_side or bet_player,
+                "book":        bet_book,
+                "odds":        int(bet_odds),
+                "stake":       float(bet_stake),
+                "to_win":      win_amt,
+                "implied_prob":imp,
+                "edge_at_bet": float(bet_edge),
+                "round":       bet_round,
+                "notes":       bet_notes,
+                "result":      "Pending",
+                "profit_loss": 0.0,
+                "logged_at":   (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat(),
+            }
+            sb.table("bets").insert(row).execute()
+            st.success(f"✅ Logged: {bet_player} {bet_market} @ {'+' if odds > 0 else ''}{int(odds)} for ${bet_stake}")
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"Error logging bet: {e}. Run the SQL below to create the bets table first.")
+            st.code("""
+CREATE TABLE IF NOT EXISTS bets (
+    id              bigserial primary key,
+    player_name     text,
+    market          text,
+    side            text,
+    book            text,
+    odds            integer,
+    stake           numeric,
+    to_win          numeric,
+    implied_prob    numeric,
+    edge_at_bet     numeric,
+    round           text,
+    notes           text,
+    result          text default 'Pending',
+    profit_loss     numeric default 0,
+    logged_at       timestamptz default now()
+);""", language="sql")
+
+    st.markdown("---")
+
+    # ── View & update existing bets ───────────────────────────
+    st.markdown('<div class="section-header">Bet Log & P&L</div>', unsafe_allow_html=True)
+
+    @st.cache_data(ttl=30)
+    def load_bets():
+        try:
+            sb = get_supabase()
+            return sb.table("bets").select("*").order("logged_at", desc=True).execute().data
+        except:
+            return []
+
+    bets = load_bets()
+
+    if bets:
+        # Summary metrics
+        total_staked = sum(b.get("stake",0) or 0 for b in bets)
+        total_pl     = sum(b.get("profit_loss",0) or 0 for b in bets)
+        settled      = [b for b in bets if b.get("result") not in ("Pending", None)]
+        wins         = [b for b in settled if b.get("result") == "Win"]
+        roi          = round(total_pl / total_staked * 100, 1) if total_staked else 0
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Total Bets", len(bets))
+        mc2.metric("Total Staked", f"${total_staked:.2f}")
+        mc3.metric("P&L", f"${total_pl:+.2f}")
+        mc4.metric("ROI", f"{roi:+.1f}%")
+
+        bet_rows = []
+        for b in bets:
+            odds = b.get("odds", 0)
+            bet_rows.append({
+                "Player":    b.get("player_name",""),
+                "Market":    b.get("market",""),
+                "Book":      b.get("book",""),
+                "Odds":      f"+{odds}" if odds > 0 else str(odds),
+                "Stake":     f"${b.get('stake',0):.2f}",
+                "To Win":    f"${b.get('to_win',0):.2f}",
+                "Edge%":     f"{b.get('edge_at_bet',0):+.1f}%",
+                "Round":     b.get("round",""),
+                "Result":    b.get("result","Pending"),
+                "P&L":       b.get("profit_loss",0) or 0,
+                "ID":        b.get("id"),
+            })
+
+        df_bets = pd.DataFrame(bet_rows)
+
+        def color_result(val):
+            if val == "Win":  return "color:#69f0ae; font-weight:700"
+            if val == "Loss": return "color:#ef9a9a; font-weight:600"
+            if val == "Push": return "color:#ffcc02"
+            return "color:#90a4ae"
+        def color_pl(val):
+            if isinstance(val, (int,float)):
+                if val > 0: return "color:#69f0ae; font-weight:600"
+                if val < 0: return "color:#ef9a9a"
+            return ""
+
+        styled_bets = df_bets.drop(columns=["ID"]).style\
+            .map(color_result, subset=["Result"])\
+            .map(color_pl, subset=["P&L"])\
+            .format({"P&L": "${:+.2f}"}, na_rep="—")
+
+        st.dataframe(styled_bets, use_container_width=True, hide_index=True)
+
+        # Update result
+        st.markdown('<div class="section-header">Update Bet Result</div>', unsafe_allow_html=True)
+        col_u1, col_u2, col_u3, col_u4 = st.columns(4)
+        with col_u1:
+            update_id = st.selectbox("Select Bet ID",
+                [f"{b['ID']} — {b['Player']} {b['Market']}" for b in bet_rows],
+                key="upd_id")
+        with col_u2:
+            new_result = st.selectbox("Result", ["Win","Loss","Push","Void"], key="upd_result")
+        with col_u3:
+            selected_bet = next((b for b in bets if str(b.get("id")) == update_id.split(" — ")[0]), {})
+            if new_result == "Win":
+                default_pl = float(selected_bet.get("to_win", 0))
+            elif new_result == "Loss":
+                default_pl = -float(selected_bet.get("stake", 0))
+            else:
+                default_pl = 0.0
+            new_pl = st.number_input("P&L ($)", value=default_pl, step=1.0, key="upd_pl")
+        with col_u4:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("✅ Update", key="upd_btn"):
+                try:
+                    sb = get_supabase()
+                    bet_id = int(update_id.split(" — ")[0])
+                    sb.table("bets").update({
+                        "result": new_result,
+                        "profit_loss": float(new_pl)
+                    }).eq("id", bet_id).execute()
+                    st.success(f"Updated bet #{bet_id} → {new_result} ${new_pl:+.2f}")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Update failed: {e}")
+    else:
+        st.markdown("""<div class="info-box">
+            No bets logged yet. Use the form above to log your first bet.<br>
+            If you see an error, run the SQL shown to create the bets table in Supabase first.
+        </div>""", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════
+# TAB 7 — SKILL RATINGS
+# ════════════════════════════════════════════════════════════
+with tab7:
     st.markdown('<div class="section-header">DataGolf Player Skill Ratings — All Ranked Players</div>', unsafe_allow_html=True)
 
     col_f, col_t = st.columns([3, 1])
@@ -962,7 +1246,7 @@ with tab5:
 # ════════════════════════════════════════════════════════════
 # TAB 5 — COURSE HISTORY
 # ════════════════════════════════════════════════════════════
-with tab6:
+with tab8:
     st.markdown(f'<div class="section-header">Course History — {current_event}</div>', unsafe_allow_html=True)
 
     ch_rows = []
@@ -1018,7 +1302,7 @@ with tab6:
 # ════════════════════════════════════════════════════════════
 # TAB 6 — LIVE MATCHUPS
 # ════════════════════════════════════════════════════════════
-with tab7:
+with tab9:
     st.markdown('<div class="section-header">Live Round H2H Matchup Odds — DataGolf Model</div>', unsafe_allow_html=True)
 
     if matchups:
@@ -1076,6 +1360,83 @@ with tab7:
             ⏳ Round matchup odds are released Wed–Thu morning of tournament week.<br>
             Run <code>py golf_sync.py --mode live</code> to pull the latest lines when available.
         </div>""", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════
+# TAB 10 — AUTO SCHEDULER
+# ════════════════════════════════════════════════════════════
+with tab10:
+    st.markdown('<div class="section-header">⚙️ Auto Scheduler — Windows Task Scheduler Setup</div>', unsafe_allow_html=True)
+
+    st.markdown("""<div class="info-box">
+        The auto scheduler runs <code>golf_sync.py --mode live</code> automatically during
+        tournament rounds so you don't have to manually trigger syncs. Set it up once and
+        it runs silently in the background all week.
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="section-header">Step 1 — Create the Batch File</div>', unsafe_allow_html=True)
+    st.markdown("Save this as `golf_sync_live.bat` in your `C:\\Golf Model` folder:")
+    st.code(r"""@echo off
+cd /d "C:\Golf Model"
+py golf_sync.py --mode live
+""", language="batch")
+
+    st.markdown('<div class="section-header">Step 2 — Open Task Scheduler</div>', unsafe_allow_html=True)
+    st.markdown("""
+1. Press **Win + S** and search **Task Scheduler**
+2. Click **Create Basic Task** in the right panel
+3. Name it: `Golf Model Live Sync`
+4. Click **Next**
+""")
+
+    st.markdown('<div class="section-header">Step 3 — Set the Trigger</div>', unsafe_allow_html=True)
+    st.markdown("""
+1. Select **Daily** → Click **Next**
+2. Set start time: **8:00 AM** (before Round 1 tee times)
+3. Click **Next**
+4. Select **Action: Start a program**
+5. Browse to `C:\\Golf Model\\golf_sync_live.bat`
+6. Click **Next** → **Finish**
+""")
+
+    st.markdown('<div class="section-header">Step 4 — Set Repeat Interval</div>', unsafe_allow_html=True)
+    st.markdown("""
+1. Find your new task in the Task Scheduler library
+2. Right-click → **Properties**
+3. Go to **Triggers** tab → **Edit**
+4. Check **Repeat task every:** → set to **30 minutes**
+5. Set **for a duration of:** → **12 hours**
+6. Click **OK** → **OK**
+""")
+
+    st.markdown("""<div class="info-box">
+        ✅ Once set up, the sync runs automatically every 30 minutes from 8AM to 8PM
+        on tournament days. The Streamlit app auto-refreshes every 15 min and will
+        pick up the latest data automatically.<br><br>
+        💡 <b>Tip:</b> Only run the scheduler on tournament days (Thu–Sun).
+        Use <code>--mode pre</code> manually on Monday/Tuesday of tournament week.
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="section-header">Manual Sync Commands</div>', unsafe_allow_html=True)
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        st.markdown("""**Pre-Tournament (Mon/Tue)**
+```
+py golf_sync.py --mode pre
+```
+Pulls field, predictions, finish odds, matchup odds""")
+    with col_s2:
+        st.markdown("""**Live (Thu–Sun during rounds)**
+```
+py golf_sync.py --mode live
+```
+Pulls live scores, updated probs, current odds""")
+    with col_s3:
+        st.markdown("""**Full Refresh (weekly)**
+```
+py golf_sync.py
+```
+Complete sync of all tables including historical data""")
 
 # ── Footer ───────────────────────────────────────────────────────────────────────
 st.markdown("---")
