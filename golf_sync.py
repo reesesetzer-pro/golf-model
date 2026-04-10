@@ -47,7 +47,7 @@ ODDS_BASE    = "https://api.the-odds-api.com/v4"
 ODDS_REGION  = "us2"
 ODDS_MARKETS = "outrights"
 ODDS_BOOKS   = [
-    "draftkings", "fanduel", "fanatics", "hardrock",
+    "draftkings", "fanduel", "hardrock",
     "thescore", "betmgm", "caesars", "bet365"
 ]
 # All golf outright markets available on The Odds API
@@ -724,8 +724,10 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
             # Individual books
             "p1_bet365":       book_lines.get("bet365", {}).get("p1"),
             "p2_bet365":       book_lines.get("bet365", {}).get("p2"),
-            "p1_bovada":       book_lines.get("bovada", {}).get("p1"),
-            "p2_bovada":       book_lines.get("bovada", {}).get("p2"),
+            "p1_betmgm":       book_lines.get("betmgm", {}).get("p1"),
+            "p2_betmgm":       book_lines.get("betmgm", {}).get("p2"),
+            "p1_caesars":      book_lines.get("caesars", {}).get("p1"),
+            "p2_caesars":      book_lines.get("caesars", {}).get("p2"),
             "p1_draftkings":   book_lines.get("draftkings", {}).get("p1"),
             "p2_draftkings":   book_lines.get("draftkings", {}).get("p2"),
             "p1_fanduel":      book_lines.get("fanduel", {}).get("p1"),

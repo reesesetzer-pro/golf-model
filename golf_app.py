@@ -895,11 +895,26 @@ with tab4:
             p2w = (m.get("p2_dg_win_prob") or 0) * 100
             p1_dg_odds = m.get("p1_dg_odds")
             p2_dg_odds = m.get("p2_dg_odds")
-            # Best available book line (stored in sync, fall back to individual books)
-            p1_best = m.get("p1_best_odds") or m.get("p1_draftkings") or m.get("p1_fanduel") or m.get("p1_bet365") or m.get("p1_bovada") or m.get("p1_thescore") or m.get("p1_hardrock")
-            p2_best = m.get("p2_best_odds") or m.get("p2_draftkings") or m.get("p2_fanduel") or m.get("p2_bet365") or m.get("p2_bovada") or m.get("p2_thescore") or m.get("p2_hardrock")
-            p1_best_bk = m.get("p1_best_book", "")
-            p2_best_bk = m.get("p2_best_book", "")
+            # Best available book line — only from approved books
+            approved = {
+                "DraftKings": m.get("p1_draftkings"), "FanDuel": m.get("p1_fanduel"),
+                "BetMGM": m.get("p1_betmgm"), "Caesars": m.get("p1_caesars"),
+                "Bet365": m.get("p1_bet365"), "theScore": m.get("p1_thescore"),
+                "Hard Rock": m.get("p1_hardrock"),
+            }
+            p1_approved = {k: v for k, v in approved.items() if v}
+            p1_best = max(p1_approved.values()) if p1_approved else None
+            p1_best_bk = max(p1_approved, key=p1_approved.get) if p1_approved else ""
+
+            approved2 = {
+                "DraftKings": m.get("p2_draftkings"), "FanDuel": m.get("p2_fanduel"),
+                "BetMGM": m.get("p2_betmgm"), "Caesars": m.get("p2_caesars"),
+                "Bet365": m.get("p2_bet365"), "theScore": m.get("p2_thescore"),
+                "Hard Rock": m.get("p2_hardrock"),
+            }
+            p2_approved = {k: v for k, v in approved2.items() if v}
+            p2_best = max(p2_approved.values()) if p2_approved else None
+            p2_best_bk = max(p2_approved, key=p2_approved.get) if p2_approved else ""
             rnd = m.get("round_num", 0)
 
             # Round filter
@@ -1191,7 +1206,7 @@ with tab6:
             bet_side    = st.text_input("Side / Description", placeholder="e.g. Scheffler to Win", key="bt_side")
             bet_tournament = st.text_input("Tournament", value=current_event, key="bt_tourn")
         with col_b:
-            bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","Bovada","Fanatics","Hard Rock","theScore"], key="bt_book")
+            bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","Hard Rock","theScore"], key="bt_book")
             bet_odds    = st.number_input("Odds (American)", value=-110, step=5, key="bt_odds")
             bet_stake   = st.number_input("Stake ($)", value=10.0, step=5.0, key="bt_stake")
             bet_closing = st.number_input("Closing Line Odds (optional)", value=0, step=5, key="bt_closing",
@@ -1258,7 +1273,7 @@ with tab6:
                     ["All","Win","Top 5","Top 10","Top 20","Make Cut","H2H"], key="filt_mkt")
             with fc3:
                 filter_book = st.selectbox("Filter by Book",
-                    ["All","DraftKings","FanDuel","BetMGM","Caesars","Bet365","Bovada"], key="filt_bk")
+                    ["All","DraftKings","FanDuel","BetMGM","Caesars","Bet365","Hard Rock","theScore"], key="filt_bk")
 
             filt_bets = bets
             if filter_result != "All": filt_bets = [b for b in filt_bets if b.get("result") == filter_result]
