@@ -678,7 +678,9 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
 
     rows = []
     for m in match_list:
-        odds      = m.get("odds", {})
+        odds = m.get("odds", {})
+        if not isinstance(odds, dict):
+            continue
         dg_odds   = odds.get("datagolf", {})
         # Collect all book lines (everything except datagolf)
         book_lines = {k: v for k, v in odds.items() if k != "datagolf" and isinstance(v, dict)}
