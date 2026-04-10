@@ -275,6 +275,14 @@ def load_data():
     schedule = sb.table("schedule").select("*").order("start_date", desc=True).execute().data
     return skill, field, preds, fin_odds, matchups, rounds, schedule
 
+def edge_tier(e):
+    e = float(e or 0)
+    if e >= 5:   return "🔥🔥 STRONG (5%+)"
+    if e >= 3:   return "🔥 SHARP (3-5%)"
+    if e >= 2:   return "✅ VALUE (2-3%)"
+    if e >= 0:   return "Below Threshold"
+    return "Manual / No Edge"
+
 def american_to_implied(odds):
     if not odds: return None
     try:
