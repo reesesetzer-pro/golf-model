@@ -58,6 +58,31 @@ GOLF_SPORTS = [
     "golf_us_open_winner",
 ]
 
+# The Odds API sport key → list of (odds_api_market, finish_odds_market) tuples
+# Each major has separate sport keys per finish market
+GOLF_FINISH_MARKET_MAP = {
+    "golf_masters_tournament_winner":       "win",
+    "golf_masters_tournament_make_cut":     "make_cut",
+    "golf_masters_tournament_top_5":        "top_5",
+    "golf_masters_tournament_top_10":       "top_10",
+    "golf_masters_tournament_top_20":       "top_20",
+    "golf_pga_championship_winner":         "win",
+    "golf_pga_championship_make_cut":       "make_cut",
+    "golf_pga_championship_top_5":          "top_5",
+    "golf_pga_championship_top_10":         "top_10",
+    "golf_pga_championship_top_20":         "top_20",
+    "golf_the_open_championship_winner":    "win",
+    "golf_the_open_championship_make_cut":  "make_cut",
+    "golf_the_open_championship_top_5":     "top_5",
+    "golf_the_open_championship_top_10":    "top_10",
+    "golf_the_open_championship_top_20":    "top_20",
+    "golf_us_open_winner":                  "win",
+    "golf_us_open_make_cut":                "make_cut",
+    "golf_us_open_top_5":                   "top_5",
+    "golf_us_open_top_10":                  "top_10",
+    "golf_us_open_top_20":                  "top_20",
+}
+
 # ── Logging ─────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -756,6 +781,78 @@ def sync_historical_odds(tour: str = "pga", year: int = 2026,
         time.sleep(0.5)
 
 
+def _normalize_name(name: str) -> str:
+    """Convert 'First Last' to 'Last, First' to match DataGolf format."""
+    if not name: return ""
+    parts = name.strip().split()
+    if len(parts) >= 2:
+        return f"{parts[-1]}, {' '.join(parts[:-1])}"
+    return name
+
+def sync_odds_api_to_finish_odds():
+    """Pull live finish position odds from The Odds API and overwrite finish_odds.
+    This replaces stale DataGolf outrights data with real-time book lines."""
+    log.info("Syncing finish odds from The Odds API (live lines)...")
+    book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
+    now = now_utc()
+
+    for sport_key, market in GOLF_FINISH_MARKET_MAP.items():
+        data = odds_get(f"sports/{sport_key}/odds", {
+            "regions":    ODDS_REGION,
+            "markets":    "outrights",
+            "bookmakers": ",".join(ODDS_BOOKS),
+            "oddsFormat": "american",
+        })
+        if not data:
+            continue
+
+        for event in data:
+            # Build player → book odds dict
+            player_odds: dict[str, dict] = {}
+            for bm in event.get("bookmakers", []):
+                book = bm.get("key")
+                if book not in book_cols: continue
+                for mkt in bm.get("markets", []):
+                    for outcome in mkt.get("outcomes", []):
+                        name = _normalize_name(outcome.get("name", ""))
+                        price = outcome.get("price")
+                        if name and price:
+                            player_odds.setdefault(name, {})[book] = int(price)
+
+            if not player_odds:
+                continue
+
+            # Build rows for finish_odds upsert
+            rows = []
+            for player_name, odds in player_odds.items():
+                best_book = max(odds, key=lambda k: odds[k]) if odds else None
+                best_odds = odds[best_book] if best_book else None
+                row = {
+                    "event_id":    "current",
+                    "market":      market,
+                    "player_name": player_name,
+                    "tour":        "pga",
+                    "best_odds":   best_odds,
+                    "best_book":   best_book,
+                    "updated_at":  now,
+                }
+                for col in book_cols:
+                    row[col] = odds.get(col)
+                rows.append(row)
+
+            if rows:
+                # Upsert by player_name + market (no dg_id available from Odds API)
+                try:
+                    supabase.table("finish_odds").upsert(
+                        rows,
+                        on_conflict="event_id,market,player_name"
+                    ).execute()
+                    log.info(f"  ✓ finish_odds ({market} via Odds API) — {len(rows)} rows")
+                except Exception as e:
+                    log.warning(f"  finish_odds upsert failed for {market}: {e}")
+        time.sleep(0.3)
+
+
 def sync_book_odds():
     """Pull outright winner odds for all golf majors from The Odds API.
     Round H2H matchup lines come from DataGolf (sync_matchup_odds) instead."""
@@ -806,6 +903,7 @@ def full_sync():
     sync_rounds(year=2025)
     sync_predictions()
     sync_finish_odds()
+    sync_odds_api_to_finish_odds()
     sync_matchup_odds()
     sync_historical_odds(year=2026)
     sync_historical_odds(year=2025)
@@ -819,6 +917,7 @@ def live_sync():
     sync_skill_ratings()
     sync_live_predictions()
     sync_finish_odds()
+    sync_odds_api_to_finish_odds()
     sync_matchup_odds()
     sync_book_odds()
     log.info("━━━  LIVE SYNC COMPLETE  ━━━")
