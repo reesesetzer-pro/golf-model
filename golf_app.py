@@ -373,7 +373,7 @@ for r in rounds:
 # Build field player list
 def implied_from_best(fo):
     """Return best available American odds from any book column."""
-    for key in ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "best_odds"]:
+    for key in ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock", "best_odds"]:
         val = fo.get(key)
         if val is not None and val != 0:
             try:
@@ -435,7 +435,8 @@ for p in [x for x in field if not x.get("withdrawn")]:
         "w_dg_p": w_prob,    "w_dg":  fo_w.get("dg_odds"),
         "w_dk":   fo_w.get("draftkings"), "w_fd":  fo_w.get("fanduel"),
         "w_mgm":  fo_w.get("betmgm"),     "w_czr": fo_w.get("caesars"),
-        "w_365":  fo_w.get("bet365"),     "w_best":w_best_odds,
+        "w_365":  fo_w.get("bet365"),     "w_score": fo_w.get("thescore"),
+        "w_hr":   fo_w.get("hardrock"),   "w_best":w_best_odds,
         "w_bk":   fo_w.get("best_book"),
         # top 5 odds
         "t5_dk":  fo_5.get("draftkings"), "t5_fd": fo_5.get("fanduel"),
@@ -488,8 +489,8 @@ with c4:
     h2h_sharp = sum(
         1 for m in matchups
         for side, dg_key, bk_keys in [
-            ("p1", "p1_dg_odds", ["p1_best_odds","p1_bet365","p1_bovada"]),
-            ("p2", "p2_dg_odds", ["p2_best_odds","p2_bet365","p2_bovada"]),
+            ("p1", "p1_dg_odds", ["p1_best_odds","p1_draftkings","p1_fanduel","p1_betmgm","p1_caesars","p1_bet365","p1_thescore","p1_hardrock"]),
+            ("p2", "p2_dg_odds", ["p2_best_odds","p2_draftkings","p2_fanduel","p2_betmgm","p2_caesars","p2_bet365","p2_thescore","p2_hardrock"]),
         ]
         for bk_odds in [[m.get(k) for k in bk_keys if m.get(k)]]
         if bk_odds and edge_pct(
@@ -663,9 +664,11 @@ with tab2:
         if fd_key:
             row["FanDuel"] = fmt_odds(p.get(fd_key))
         if mk == "w":
-            row["BetMGM"]  = fmt_odds(p.get("w_mgm"))
-            row["Caesars"] = fmt_odds(p.get("w_czr"))
-            row["Bet365"]  = fmt_odds(p.get("w_365"))
+            row["BetMGM"]   = fmt_odds(p.get("w_mgm"))
+            row["Caesars"]  = fmt_odds(p.get("w_czr"))
+            row["Bet365"]   = fmt_odds(p.get("w_365"))
+            row["theScore"] = fmt_odds(p.get("w_score"))
+            row["Hard Rock"]= fmt_odds(p.get("w_hr"))
         rows2.append(row)
 
     df2 = pd.DataFrame(rows2).sort_values("Edge%", ascending=False)
@@ -893,8 +896,8 @@ with tab4:
             p1_dg_odds = m.get("p1_dg_odds")
             p2_dg_odds = m.get("p2_dg_odds")
             # Best available book line (stored in sync, fall back to individual books)
-            p1_best = m.get("p1_best_odds") or m.get("p1_bet365") or m.get("p1_bovada") or m.get("p1_draftkings") or m.get("p1_fanduel")
-            p2_best = m.get("p2_best_odds") or m.get("p2_bet365") or m.get("p2_bovada") or m.get("p2_draftkings") or m.get("p2_fanduel")
+            p1_best = m.get("p1_best_odds") or m.get("p1_draftkings") or m.get("p1_fanduel") or m.get("p1_bet365") or m.get("p1_bovada") or m.get("p1_thescore") or m.get("p1_hardrock")
+            p2_best = m.get("p2_best_odds") or m.get("p2_draftkings") or m.get("p2_fanduel") or m.get("p2_bet365") or m.get("p2_bovada") or m.get("p2_thescore") or m.get("p2_hardrock")
             p1_best_bk = m.get("p1_best_book", "")
             p2_best_bk = m.get("p2_best_book", "")
             rnd = m.get("round_num", 0)

@@ -299,6 +299,8 @@ create table if not exists finish_odds (
     betmgm          integer,
     caesars         integer,
     bet365          integer,
+    thescore        integer,
+    hardrock        integer,
     best_odds       integer,
     best_book       text,
     updated_at      timestamptz default now(),
@@ -603,7 +605,7 @@ def sync_finish_odds(tour: str = "pga"):
         for p in players:
             if not isinstance(p, dict): continue
             # Find best odds (highest American = best value for bettors)
-            book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365"]
+            book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
             book_odds = {k: p.get(k) for k in book_cols if p.get(k)}
             best_odds = None
             best_book = None
@@ -625,6 +627,8 @@ def sync_finish_odds(tour: str = "pga"):
                 "betmgm":      p.get("betmgm"),
                 "caesars":     p.get("caesars"),
                 "bet365":      p.get("bet365"),
+                "thescore":    p.get("thescore"),
+                "hardrock":    p.get("hardrock"),
                 "best_odds":   best_odds,
                 "best_book":   best_book,
                 "updated_at":  now_utc(),
@@ -701,6 +705,10 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
             "p2_draftkings":   book_lines.get("draftkings", {}).get("p2"),
             "p1_fanduel":      book_lines.get("fanduel", {}).get("p1"),
             "p2_fanduel":      book_lines.get("fanduel", {}).get("p2"),
+            "p1_thescore":     book_lines.get("thescore", {}).get("p1"),
+            "p2_thescore":     book_lines.get("thescore", {}).get("p2"),
+            "p1_hardrock":     book_lines.get("hardrock", {}).get("p1"),
+            "p2_hardrock":     book_lines.get("hardrock", {}).get("p2"),
             "updated_at":      now_utc(),
         }
         rows.append(row)
