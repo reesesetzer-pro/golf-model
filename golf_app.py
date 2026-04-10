@@ -15,7 +15,35 @@ def now_et():
     et_now = utc_now - timedelta(hours=4)
     return et_now.strftime("%I:%M %p ET")
 
-# ── Page config ────────────────────────────────────────────────────────────────
+def quick_log_bet(player, market, book, odds, edge, stake=10.0, notes="", event=""):
+    """One-click bet logging from any sharp play list."""
+    try:
+        sb = get_supabase()
+        o   = float(odds)
+        imp = round((100/(o+100)*100) if o > 0 else (abs(o)/(abs(o)+100)*100), 2)
+        win = round((stake * o / 100) if o > 0 else (stake * 100 / abs(o)), 2)
+        tier = "🔥🔥 STRONG (5%+)" if edge >= 5 else ("🔥 SHARP (3-5%)" if edge >= 3 else "✅ VALUE (2-3%)")
+        sb.table("bets").insert({
+            "player_name":  player,
+            "market":       market,
+            "side":         f"{player} {market}",
+            "book":         book,
+            "odds":         int(o),
+            "stake":        stake,
+            "to_win":       win,
+            "implied_prob": imp,
+            "edge_at_bet":  round(edge, 2),
+            "round":        "Live",
+            "notes":        f"[{tier}] [{event}] {notes}",
+            "result":       "Pending",
+            "profit_loss":  0.0,
+            "logged_at":    (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat(),
+        }).execute()
+        return True
+    except Exception as e:
+        return False
+
+
 st.set_page_config(
     page_title="Golf Betting Model",
     page_icon="⛳",
@@ -37,6 +65,11 @@ with st.sidebar:
     if refresh_mins > 0:
         st_autorefresh(interval=refresh_mins * 60 * 1000, key="golf_refresh")
         st.caption(f"🔄 Refreshing every {refresh_mins} min")
+
+    st.markdown("---")
+    st.markdown("### 💰 Quick Bet Settings")
+    default_stake = st.number_input("Default Stake ($)", value=10.0, step=5.0, key="default_stake")
+    st.caption("Used when clicking 🎯 Take It on any play")
 
 # ── Theme / CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -652,7 +685,57 @@ with tab2:
         .map(color_edge2, subset=["Edge%"])\
         .map(color_sharp2, subset=["Sharp Value"])\
         .format(fmt_cols, na_rep="—")
-    st.dataframe(styled2, use_container_width=True, hide_index=True, height=500)
+    st.dataframe(styled2, use_container_width=True, hide_index=True, height=400)
+
+    # ── One-click Take It for sharp plays ──────────────────────
+    sharp_plays2 = [r for r in df2.to_dict("records") if r.get("Sharp Value") and "—" not in str(r.get("Sharp Value",""))]
+    if sharp_plays2:
+        st.markdown('<div class="section-header">🎯 Sharp Plays — Click to Log</div>', unsafe_allow_html=True)
+        for i, play in enumerate(sharp_plays2):
+            edge    = play.get("Edge%", 0)
+            sv      = play.get("Sharp Value","")
+            player  = play.get("Player","")
+            best    = play.get("Best Odds","—")
+            book    = play.get("Best Book","")
+            prob    = play.get("DG Prob%", 0)
+            border  = "#69f0ae" if edge >= 5 else ("#a5d6a7" if edge >= 3 else "#81c784")
+
+            col_info, col_btn = st.columns([5, 1])
+            with col_info:
+                st.markdown(f"""
+                <div style="border-left:4px solid {border}; padding:10px 14px; margin:4px 0;
+                            background:#1a1a1a; border-radius:4px;">
+                    <span style="color:{border}; font-weight:700">{sv}</span>
+                    <span style="color:#fff; font-weight:600; margin-left:12px">{player}</span>
+                    <span style="color:#888"> · {market_sel}</span>
+                    <br>
+                    <span style="color:#90a4ae; font-size:0.85rem">
+                        DG Prob: {prob:.2f}% · Best Odds: {best} @ {book}
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_btn:
+                stake = st.session_state.get("default_stake", 10.0)
+                if st.button("🎯 Take It", key=f"fo_take_{i}_{market_sel}"):
+                    odds_val = None
+                    try:
+                        odds_val = int(str(best).replace("+",""))
+                    except: pass
+                    if odds_val:
+                        ok = quick_log_bet(
+                            player=player, market=market_sel,
+                            book=book, odds=odds_val,
+                            edge=edge, stake=stake,
+                            event=current_event,
+                            notes=f"DG Prob: {prob:.2f}%"
+                        )
+                        if ok:
+                            st.success("✅ Logged!")
+                            st.cache_data.clear()
+                        else:
+                            st.error("Failed")
+                    else:
+                        st.warning("No odds to log")
 
     pos = (df2["Edge%"] > 2).sum()
     st.markdown(f"""<div class="info-box">
@@ -869,37 +952,69 @@ with tab4:
                     })
 
         if h2h_rows:
-            df_h2h = pd.DataFrame(h2h_rows).sort_values("Edge%", ascending=False)
-
-            def color_h2h_edge(val):
-                if isinstance(val, (int, float)):
-                    if val >= 5:  return "background-color:#1a3a1a; color:#69f0ae; font-weight:700"
-                    if val >= 3:  return "background-color:#1e3320; color:#a5d6a7; font-weight:600"
-                    if val >= 2:  return "background-color:#1b2e1b; color:#81c784"
-                return ""
-
-            def color_sharp_h2h(val):
-                if isinstance(val, str):
-                    if "STRONG" in val: return "background-color:#1a3a1a; color:#69f0ae; font-weight:700"
-                    if "SHARP"  in val: return "background-color:#1e3320; color:#a5d6a7; font-weight:600"
-                    if "VALUE"  in val: return "background-color:#1b2e1b; color:#81c784"
-                return ""
-
-            styled_h2h = df_h2h.style\
-                .map(color_h2h_edge, subset=["Edge%"])\
-                .map(color_sharp_h2h, subset=["Sharp Value"])\
-                .format({
-                    "DG Win%":    "{:.2f}%",
-                    "Book Impl%": "{:.2f}%",
-                    "Edge%":      "{:+.2f}%",
-                }, na_rep="—")
-
-            st.dataframe(styled_h2h, use_container_width=True, hide_index=True, height=520)
+            sorted_plays = sorted(h2h_rows, key=lambda x: -x["Edge%"])
             st.markdown(f"""<div class="info-box">
-                {len(df_h2h)} plays above {min_edge_h2h:.1f}% edge threshold ·
-                Sorted by edge % ·
-                🔥🔥 STRONG = ≥5% · 🔥 SHARP = ≥3% · ✅ VALUE = ≥2%
+                {len(sorted_plays)} plays above {min_edge_h2h:.1f}% edge threshold ·
+                Sorted by edge % · Click <b>🎯 Take It</b> to instantly log the bet
             </div>""", unsafe_allow_html=True)
+
+            for i, play in enumerate(sorted_plays):
+                edge   = play["Edge%"]
+                sv     = play["Sharp Value"]
+                player = play["Bet On"]
+                opp    = play["Opponent"]
+                dg_odds= play["DG Odds"]
+                best   = play["Best Book"]
+                book   = play.get("Book","")
+                dg_w   = play["DG Win%"]
+                bk_w   = play["Book Impl%"]
+
+                # Color border by tier
+                if edge >= 5:   border = "#69f0ae"
+                elif edge >= 3: border = "#a5d6a7"
+                else:           border = "#81c784"
+
+                col_info, col_btn = st.columns([5, 1])
+                with col_info:
+                    st.markdown(f"""
+                    <div style="border-left:4px solid {border}; padding:10px 14px; margin:4px 0;
+                                background:#1a1a1a; border-radius:4px;">
+                        <span style="color:{border}; font-weight:700; font-size:1rem">{sv}</span>
+                        <span style="color:#fff; font-weight:600; margin-left:12px">{player}</span>
+                        <span style="color:#888"> vs {opp}</span>
+                        <span style="color:#ffcc02; margin-left:16px">R{play['Round']}</span>
+                        <br>
+                        <span style="color:#90a4ae; font-size:0.85rem">
+                            DG Model: {dg_w:.1f}% · Book Implied: {bk_w:.1f}% ·
+                            DG Odds: {dg_odds} · Best Book: {best} ({book})
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_btn:
+                    stake = st.session_state.get("default_stake", 10.0)
+                    if st.button(f"🎯 Take It", key=f"h2h_take_{i}"):
+                        odds_val = None
+                        for odds_str in [best, dg_odds]:
+                            if odds_str and odds_str not in ("—", "None", ""):
+                                try:
+                                    odds_val = int(str(odds_str).replace("+",""))
+                                    break
+                                except: pass
+                        if odds_val:
+                            ok = quick_log_bet(
+                                player=player, market="H2H",
+                                book=book or "Best Available",
+                                odds=odds_val, edge=edge,
+                                stake=stake, event=current_event,
+                                notes=f"vs {opp} | DG: {dg_w:.1f}% | Book: {bk_w:.1f}%"
+                            )
+                            if ok:
+                                st.success(f"✅ Logged!")
+                                st.cache_data.clear()
+                            else:
+                                st.error("Failed — check bets table exists")
+                        else:
+                            st.warning("No odds available to log")
         else:
             st.markdown("""<div class="info-box">
                 No plays meet the current edge threshold. Try lowering the Min Edge % slider
@@ -1376,17 +1491,69 @@ with tab6:
                 if "MEDIUM" in str(val): return "color:#ffcc02; font-weight:600"
                 return "color:#90a4ae"
 
-            styled_rec = df_rec.style\
-                .map(color_sharp, subset=["Sharp Value"])\
-                .map(color_conf,  subset=["Confidence"])\
-                .format({"DG Prob%":"{:.2f}%","Edge%":"{:+.2f}%"}, na_rep="—")
+            st.dataframe(
+                df_rec.style
+                    .map(color_sharp, subset=["Sharp Value"])
+                    .map(color_conf,  subset=["Confidence"])
+                    .format({"DG Prob%":"{:.2f}%","Edge%":"{:+.2f}%"}, na_rep="—"),
+                use_container_width=True, hide_index=True, height=350
+            )
 
-            st.dataframe(styled_rec, use_container_width=True, hide_index=True, height=500)
+            st.markdown('<div class="section-header">🎯 Click to Log These Plays</div>', unsafe_allow_html=True)
+            for i, play in enumerate(rec_rows):
+                edge    = play["Edge%"]
+                sv      = play["Sharp Value"]
+                player  = play["Player"]
+                market  = play["Market"]
+                best    = play["Best Odds"]
+                book    = play["Best Book"]
+                prob    = play["DG Prob%"]
+                conf    = play["Confidence"]
+                hist    = play["History"]
+                border  = "#69f0ae" if "HIGH" in conf else ("#ffcc02" if "MEDIUM" in conf else "#81c784")
+
+                col_info, col_btn = st.columns([5, 1])
+                with col_info:
+                    st.markdown(f"""
+                    <div style="border-left:4px solid {border}; padding:10px 14px; margin:4px 0;
+                                background:#1a1a1a; border-radius:4px;">
+                        <span style="color:{border}; font-weight:700">{sv}</span>
+                        <span style="color:#fff; font-weight:600; margin-left:12px">{player}</span>
+                        <span style="color:#888"> · {market}</span>
+                        <span style="color:{border}; margin-left:12px; font-size:0.85rem">{conf}</span>
+                        <br>
+                        <span style="color:#90a4ae; font-size:0.85rem">
+                            DG: {prob:.2f}% · Best: {best} @ {book} · {hist}
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_btn:
+                    stake = st.session_state.get("default_stake", 10.0)
+                    if st.button("🎯 Take It", key=f"rec_take_{i}"):
+                        odds_val = None
+                        try:
+                            odds_val = int(str(best).replace("+",""))
+                        except: pass
+                        if odds_val:
+                            ok = quick_log_bet(
+                                player=player, market=market,
+                                book=book, odds=odds_val,
+                                edge=edge, stake=stake,
+                                event=current_event,
+                                notes=f"Model rec | DG: {prob:.2f}% | {hist}"
+                            )
+                            if ok:
+                                st.success("✅ Logged!")
+                                st.cache_data.clear()
+                            else:
+                                st.error("Failed")
+                        else:
+                            st.warning("No odds available")
 
             st.markdown(f"""<div class="info-box">
                 {len(df_rec)} recommended plays above threshold ·
-                Confidence is based on your historical ROI for each edge tier ·
-                As you log more bets the system learns which tiers to trust
+                Confidence based on your historical ROI per edge tier ·
+                System learns week over week as you log results
             </div>""", unsafe_allow_html=True)
         else:
             st.markdown("""<div class="info-box">
