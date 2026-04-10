@@ -507,7 +507,7 @@ with c4:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "📊 Tournament Forecast",
     "💰 Finish Odds + Edge",
     "⚔️ H2H Matchup Tool",
@@ -518,6 +518,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "🏌️ Course History",
     "🔴 Live Matchups",
     "⚙️ Auto Scheduler",
+    "📚 Best Plays by Book",
 ])
 
 # ════════════════════════════════════════════════════════════
@@ -1833,6 +1834,168 @@ Pulls live scores, updated probs, current odds""")
 py golf_sync.py
 ```
 Complete sync of all tables including historical data""")
+
+# ════════════════════════════════════════════════════════════
+# TAB 11 — BEST PLAYS BY BOOK
+# ════════════════════════════════════════════════════════════
+with tab11:
+    st.markdown('<div class="section-header">📚 Best Plays by Book — Where to Bet Today</div>', unsafe_allow_html=True)
+    st.markdown("""<div class="info-box">
+        Top edges available at each sportsbook across all markets (Finish Position + H2H).
+        Ranked by Sharp Value tier, then Edge %. Only plays ≥3% edge shown.
+        Use this to know exactly which app to open for each bet.
+    </div>""", unsafe_allow_html=True)
+
+    APPROVED_BOOKS = [
+        ("DraftKings",  "dk"),
+        ("FanDuel",     "fd"),
+        ("BetMGM",      "mgm"),
+        ("Caesars",     "czr"),
+        ("Bet365",      "365"),
+        ("theScore",    "score"),
+        ("Hard Rock",   "hr"),
+    ]
+
+    FINISH_MARKETS = [
+        ("Win",      "w",   "win"),
+        ("Top 5",    "t5",  "top_5"),
+        ("Top 10",   "t10", "top_10"),
+        ("Top 20",   "t20", "top_20"),
+        ("Make Cut", "c",   "make_cut"),
+    ]
+
+    # Map book label → finish_odds field key
+    BOOK_FO_KEY = {
+        "DraftKings": "w_dk",  "FanDuel": "w_fd",   "BetMGM": "w_mgm",
+        "Caesars":    "w_czr", "Bet365":  "w_365",  "theScore": "w_score",
+        "Hard Rock":  "w_hr",
+    }
+    BOOK_MK_PREFIX = {
+        "DraftKings": "draftkings", "FanDuel": "fanduel",   "BetMGM": "betmgm",
+        "Caesars":    "caesars",    "Bet365":  "bet365",    "theScore": "thescore",
+        "Hard Rock":  "hardrock",
+    }
+
+    def tier_sort_key(tier, edge):
+        order = {"🔥🔥 STRONG": 0, "🔥 SHARP": 1, "✅ VALUE": 2}
+        t = tier.split(" +")[0] if tier else "—"
+        return (order.get(t, 9), -(edge or 0))
+
+    MIN_EDGE = 3.0
+    book_plays = {book: [] for book, _ in APPROVED_BOOKS}
+
+    # ── Finish position plays ──
+    for market_label, mk, mk_threshold in FINISH_MARKETS:
+        prob_key = f"{mk}_p"
+        for p in field_players:
+            prob = p.get(prob_key)
+            if not prob: continue
+            for book_name, _ in APPROVED_BOOKS:
+                # Get this book's odds for this market
+                if mk == "w":
+                    book_field = f"w_{BOOK_MK_PREFIX[book_name]}" if mk == "w" else None
+                    # use stored keys
+                    bk_map = {
+                        "DraftKings": p.get("w_dk"),  "FanDuel": p.get("w_fd"),
+                        "BetMGM":     p.get("w_mgm"), "Caesars": p.get("w_czr"),
+                        "Bet365":     p.get("w_365"), "theScore": p.get("w_score"),
+                        "Hard Rock":  p.get("w_hr"),
+                    }
+                    odds = bk_map.get(book_name)
+                else:
+                    # For other markets pull from fo_index via field_players best key
+                    # We only store best odds, not per-book for t5/t10/t20/cut
+                    # Skip non-win per-book breakdown (not stored per book)
+                    continue
+                if not odds: continue
+                e, sv = sharp_value(prob, odds, mk_threshold)
+                if e is None or e < MIN_EDGE: continue
+                sv_display = f"{sv} +{e:.2f}%" if sv else f"+{e:.2f}%"
+                book_plays[book_name].append({
+                    "tier":    sv.split(" +")[0] if sv else "—",
+                    "edge":    e,
+                    "label":   sv_display,
+                    "play":    f"{p['name']} {market_label}",
+                    "odds":    fmt_odds(odds),
+                    "dg_prob": round(prob, 2),
+                    "market":  market_label,
+                })
+
+    # ── H2H plays ──
+    if matchups:
+        for m in matchups:
+            p1w = (m.get("p1_dg_win_prob") or 0) * 100
+            p2w = (m.get("p2_dg_win_prob") or 0) * 100
+            rnd = m.get("round_num", 0)
+            rnd_label = f"R{rnd}" if rnd else ""
+            for side, name_key, dg_prob, prefix in [
+                ("p1", "p1_name", p1w, "p1"),
+                ("p2", "p2_name", p2w, "p2"),
+            ]:
+                if not dg_prob: continue
+                dg_odds = m.get(f"{prefix}_dg_odds")
+                if not dg_odds: continue
+                for book_name, _ in APPROVED_BOOKS:
+                    bk = BOOK_MK_PREFIX[book_name]
+                    odds = m.get(f"{prefix}_{bk}")
+                    if not odds: continue
+                    dg_imp = american_to_implied(dg_odds) or 0
+                    bk_imp = american_to_implied(odds) or 0
+                    e = round(dg_imp - bk_imp, 2)
+                    if e < MIN_EDGE: continue
+                    _, sv = sharp_value(dg_imp, odds, "matchup")
+                    sv_display = f"{sv} +{e:.2f}%" if sv else f"+{e:.2f}%"
+                    opp = m.get("p2_name" if side == "p1" else "p1_name", "")
+                    book_plays[book_name].append({
+                        "tier":    sv.split(" +")[0] if sv else "—",
+                        "edge":    e,
+                        "label":   sv_display,
+                        "play":    f"{m.get(name_key,'')} vs {opp} {rnd_label}",
+                        "odds":    fmt_odds(odds),
+                        "dg_prob": round(dg_imp, 2),
+                        "market":  f"H2H {rnd_label}",
+                    })
+
+    # ── Display — 2 columns of book cards ──
+    total_plays = sum(len(v) for v in book_plays.values())
+    if total_plays == 0:
+        st.info("No plays above 3% edge threshold across any book. Run a live sync and refresh.")
+    else:
+        cols = st.columns(2)
+        for i, (book_name, _) in enumerate(APPROVED_BOOKS):
+            plays = sorted(book_plays[book_name], key=lambda x: tier_sort_key(x["tier"], x["edge"]))
+            with cols[i % 2]:
+                tier_counts = {}
+                for pl in plays:
+                    tier_counts[pl["tier"]] = tier_counts.get(pl["tier"], 0) + 1
+                summary = " · ".join(f"{v}× {k}" for k, v in tier_counts.items())
+                st.markdown(f"""
+<div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:1rem;margin-bottom:1rem">
+  <div style="font-size:1.1rem;font-weight:700;color:#fff;margin-bottom:0.4rem">
+    {book_name}
+    <span style="font-size:0.75rem;color:#aaa;font-weight:400;margin-left:0.5rem">{len(plays)} play{'s' if len(plays)!=1 else ''}{(' · ' + summary) if summary else ''}</span>
+  </div>""", unsafe_allow_html=True)
+
+                if not plays:
+                    st.markdown('<div style="color:#666;font-size:0.85rem;padding:0.3rem 0">No plays above threshold</div>', unsafe_allow_html=True)
+                else:
+                    for pl in plays:
+                        tier = pl["tier"]
+                        color = "#69f0ae" if "STRONG" in tier else ("#a5d6a7" if "SHARP" in tier else "#81c784")
+                        st.markdown(f"""
+  <div style="border-left:3px solid {color};padding:0.4rem 0.6rem;margin:0.3rem 0;background:#222;border-radius:0 4px 4px 0">
+    <span style="color:{color};font-weight:600;font-size:0.85rem">{pl['label']}</span>
+    <span style="color:#fff;font-size:0.85rem;margin-left:0.5rem">{pl['play']}</span>
+    <span style="color:#aaa;font-size:0.8rem;margin-left:0.5rem">· {pl['odds']} · DG {pl['dg_prob']:.1f}%</span>
+  </div>""", unsafe_allow_html=True)
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown(f"""<div style="color:#aaa;font-size:0.8rem;margin-top:0.5rem">
+            {total_plays} total plays above 3% edge · Refresh after running
+            <code>py golf_sync.py --mode live</code>
+        </div>""", unsafe_allow_html=True)
+
 
 # ── Footer ───────────────────────────────────────────────────────────────────────
 st.markdown("---")
