@@ -1018,79 +1018,10 @@ with tab5:
 
 
 # ════════════════════════════════════════════════════════════
-# TAB 6 — RESULTS TRACKER
+# TAB 6 — RESULTS TRACKER (LEARNING SYSTEM)
 # ════════════════════════════════════════════════════════════
 with tab6:
-    st.markdown('<div class="section-header">📝 Results Tracker — Log & Track Bets</div>', unsafe_allow_html=True)
-
-    # ── Log a new bet ──────────────────────────────────────────
-    st.markdown('<div class="section-header">Log a Bet</div>', unsafe_allow_html=True)
-
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        bet_player  = st.selectbox("Player", [p["name"] for p in field_players], key="bt_player")
-        bet_market  = st.selectbox("Market", ["Win","Top 5","Top 10","Top 20","Make Cut","H2H"], key="bt_market")
-        bet_side    = st.text_input("Side / Bet Description", placeholder="e.g. Scheffler to Win", key="bt_side")
-    with col_b:
-        bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","Fanatics","Hard Rock","theScore"], key="bt_book")
-        bet_odds    = st.number_input("Odds (American)", value=-110, step=5, key="bt_odds")
-        bet_stake   = st.number_input("Stake ($)", value=10.0, step=5.0, key="bt_stake")
-    with col_c:
-        bet_edge    = st.number_input("Edge % at time of bet", value=0.0, step=0.1, key="bt_edge")
-        bet_round   = st.selectbox("Round", ["Pre-Tournament","R1","R2","R3","R4"], key="bt_round")
-        bet_notes   = st.text_area("Notes", placeholder="Why this bet?", height=68, key="bt_notes")
-
-    if st.button("➕ Log Bet", key="log_btn"):
-        try:
-            sb = get_supabase()
-            # Calculate implied prob and to-win amount
-            odds = float(bet_odds)
-            imp  = round((100/(odds+100)*100) if odds > 0 else (abs(odds)/(abs(odds)+100)*100), 2)
-            win_amt = round((bet_stake * odds / 100) if odds > 0 else (bet_stake * 100 / abs(odds)), 2)
-            row = {
-                "player_name": bet_player,
-                "market":      bet_market,
-                "side":        bet_side or bet_player,
-                "book":        bet_book,
-                "odds":        int(bet_odds),
-                "stake":       float(bet_stake),
-                "to_win":      win_amt,
-                "implied_prob":imp,
-                "edge_at_bet": float(bet_edge),
-                "round":       bet_round,
-                "notes":       bet_notes,
-                "result":      "Pending",
-                "profit_loss": 0.0,
-                "logged_at":   (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat(),
-            }
-            sb.table("bets").insert(row).execute()
-            st.success(f"✅ Logged: {bet_player} {bet_market} @ {'+' if odds > 0 else ''}{int(odds)} for ${bet_stake}")
-            st.cache_data.clear()
-        except Exception as e:
-            st.error(f"Error logging bet: {e}. Run the SQL below to create the bets table first.")
-            st.code("""
-CREATE TABLE IF NOT EXISTS bets (
-    id              bigserial primary key,
-    player_name     text,
-    market          text,
-    side            text,
-    book            text,
-    odds            integer,
-    stake           numeric,
-    to_win          numeric,
-    implied_prob    numeric,
-    edge_at_bet     numeric,
-    round           text,
-    notes           text,
-    result          text default 'Pending',
-    profit_loss     numeric default 0,
-    logged_at       timestamptz default now()
-);""", language="sql")
-
-    st.markdown("---")
-
-    # ── View & update existing bets ───────────────────────────
-    st.markdown('<div class="section-header">Bet Log & P&L</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📝 Results Tracker — Bet Log, P&L & Learning Analytics</div>', unsafe_allow_html=True)
 
     @st.cache_data(ttl=30)
     def load_bets():
@@ -1101,95 +1032,367 @@ CREATE TABLE IF NOT EXISTS bets (
             return []
 
     bets = load_bets()
+    settled  = [b for b in bets if b.get("result") not in ("Pending", None, "Void")]
+    pending  = [b for b in bets if b.get("result") in ("Pending", None)]
+    wins     = [b for b in settled if b.get("result") == "Win"]
+    total_staked = sum(b.get("stake",0) or 0 for b in bets)
+    total_pl     = sum(b.get("profit_loss",0) or 0 for b in settled)
+    roi          = round(total_pl / sum(b.get("stake",0) or 0 for b in settled) * 100, 1) if settled else 0
+    win_rate     = round(len(wins) / len(settled) * 100, 1) if settled else 0
 
-    if bets:
-        # Summary metrics
-        total_staked = sum(b.get("stake",0) or 0 for b in bets)
-        total_pl     = sum(b.get("profit_loss",0) or 0 for b in bets)
-        settled      = [b for b in bets if b.get("result") not in ("Pending", None)]
-        wins         = [b for b in settled if b.get("result") == "Win"]
-        roi          = round(total_pl / total_staked * 100, 1) if total_staked else 0
+    # ── Top metric cards ──────────────────────────────────────
+    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
+    mc1.metric("Total Bets",    len(bets))
+    mc2.metric("Settled",       len(settled))
+    mc3.metric("Win Rate",      f"{win_rate:.1f}%")
+    mc4.metric("Total Staked",  f"${total_staked:.2f}")
+    mc5.metric("P&L",           f"${total_pl:+.2f}")
+    mc6.metric("ROI",           f"{roi:+.1f}%")
 
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Total Bets", len(bets))
-        mc2.metric("Total Staked", f"${total_staked:.2f}")
-        mc3.metric("P&L", f"${total_pl:+.2f}")
-        mc4.metric("ROI", f"{roi:+.1f}%")
+    st.markdown("---")
 
-        bet_rows = []
-        for b in bets:
-            odds = b.get("odds", 0)
-            bet_rows.append({
-                "Player":    b.get("player_name",""),
-                "Market":    b.get("market",""),
-                "Book":      b.get("book",""),
-                "Odds":      f"+{odds}" if odds > 0 else str(odds),
-                "Stake":     f"${b.get('stake',0):.2f}",
-                "To Win":    f"${b.get('to_win',0):.2f}",
-                "Edge%":     f"{b.get('edge_at_bet',0):+.1f}%",
-                "Round":     b.get("round",""),
-                "Result":    b.get("result","Pending"),
-                "P&L":       b.get("profit_loss",0) or 0,
-                "ID":        b.get("id"),
-            })
+    # ── Sub-tabs ──────────────────────────────────────────────
+    r_tab1, r_tab2, r_tab3, r_tab4 = st.tabs([
+        "➕ Log Bet", "📋 Bet Log", "📊 Learning Analytics", "🎯 Model Recommendations"
+    ])
 
-        df_bets = pd.DataFrame(bet_rows)
+    # ── LOG BET ───────────────────────────────────────────────
+    with r_tab1:
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            bet_player  = st.selectbox("Player", ["(Other)"] + [p["name"] for p in field_players], key="bt_player")
+            bet_market  = st.selectbox("Market", ["Win","Top 5","Top 10","Top 20","Make Cut","H2H"], key="bt_market")
+            bet_side    = st.text_input("Side / Description", placeholder="e.g. Scheffler to Win", key="bt_side")
+            bet_tournament = st.text_input("Tournament", value=current_event, key="bt_tourn")
+        with col_b:
+            bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","Bovada","Fanatics","Hard Rock","theScore"], key="bt_book")
+            bet_odds    = st.number_input("Odds (American)", value=-110, step=5, key="bt_odds")
+            bet_stake   = st.number_input("Stake ($)", value=10.0, step=5.0, key="bt_stake")
+            bet_closing = st.number_input("Closing Line Odds (optional)", value=0, step=5, key="bt_closing",
+                                          help="Enter the closing line odds to track CLV. Leave 0 if unknown.")
+        with col_c:
+            bet_edge    = st.number_input("Model Edge % at bet", value=0.0, step=0.1, key="bt_edge")
+            bet_round   = st.selectbox("Round", ["Pre-Tournament","R1","R2","R3","R4"], key="bt_round")
+            bet_thresh  = st.selectbox("Edge Tier at Bet",
+                ["VALUE (2-3%)", "SHARP (3-5%)", "STRONG (5%+)", "Below Threshold", "Manual Pick"],
+                key="bt_thresh")
+            bet_notes   = st.text_area("Notes", placeholder="Why this bet? What does the model say?", height=80, key="bt_notes")
 
-        def color_result(val):
-            if val == "Win":  return "color:#69f0ae; font-weight:700"
-            if val == "Loss": return "color:#ef9a9a; font-weight:600"
-            if val == "Push": return "color:#ffcc02"
-            return "color:#90a4ae"
-        def color_pl(val):
-            if isinstance(val, (int,float)):
-                if val > 0: return "color:#69f0ae; font-weight:600"
-                if val < 0: return "color:#ef9a9a"
-            return ""
+        if st.button("➕ Log Bet", key="log_btn", type="primary"):
+            try:
+                sb = get_supabase()
+                odds    = float(bet_odds)
+                imp     = round((100/(odds+100)*100) if odds > 0 else (abs(odds)/(abs(odds)+100)*100), 2)
+                win_amt = round((bet_stake * odds / 100) if odds > 0 else (bet_stake * 100 / abs(odds)), 2)
+                clv     = None
+                if bet_closing and float(bet_closing) != 0:
+                    cl_imp = (100/(float(bet_closing)+100)*100) if float(bet_closing) > 0 else (abs(float(bet_closing))/(abs(float(bet_closing))+100)*100)
+                    clv    = round(imp - cl_imp, 2)  # positive = beat the closing line
+                row = {
+                    "player_name":  bet_player if bet_player != "(Other)" else bet_side,
+                    "market":       bet_market,
+                    "side":         bet_side or bet_player,
+                    "book":         bet_book,
+                    "odds":         int(bet_odds),
+                    "stake":        float(bet_stake),
+                    "to_win":       win_amt,
+                    "implied_prob": imp,
+                    "edge_at_bet":  float(bet_edge),
+                    "round":        bet_round,
+                    "notes":        f"[{bet_thresh}] [{bet_tournament}] {bet_notes}",
+                    "result":       "Pending",
+                    "profit_loss":  0.0,
+                    "logged_at":    (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat(),
+                }
+                sb.table("bets").insert(row).execute()
+                st.success(f"✅ Logged: {row['player_name']} {bet_market} @ {'+' if odds > 0 else ''}{int(odds)} | Edge: {bet_edge:+.1f}% | Stake: ${bet_stake:.2f}")
+                st.cache_data.clear()
+            except Exception as e:
+                st.error(f"Error: {e}")
+                st.code("""CREATE TABLE IF NOT EXISTS bets (
+    id bigserial primary key, player_name text, market text,
+    side text, book text, odds integer, stake numeric,
+    to_win numeric, implied_prob numeric, edge_at_bet numeric,
+    round text, notes text, result text default 'Pending',
+    profit_loss numeric default 0, logged_at timestamptz default now()
+);""", language="sql")
 
-        styled_bets = df_bets.drop(columns=["ID"]).style\
-            .map(color_result, subset=["Result"])\
-            .map(color_pl, subset=["P&L"])\
-            .format({"P&L": "${:+.2f}"}, na_rep="—")
+    # ── BET LOG ───────────────────────────────────────────────
+    with r_tab2:
+        if not bets:
+            st.info("No bets logged yet. Use the Log Bet tab to get started.")
+        else:
+            # Filter controls
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                filter_result = st.selectbox("Filter by Result",
+                    ["All","Pending","Win","Loss","Push","Void"], key="filt_res")
+            with fc2:
+                filter_market = st.selectbox("Filter by Market",
+                    ["All","Win","Top 5","Top 10","Top 20","Make Cut","H2H"], key="filt_mkt")
+            with fc3:
+                filter_book = st.selectbox("Filter by Book",
+                    ["All","DraftKings","FanDuel","BetMGM","Caesars","Bet365","Bovada"], key="filt_bk")
 
-        st.dataframe(styled_bets, use_container_width=True, hide_index=True)
+            filt_bets = bets
+            if filter_result != "All": filt_bets = [b for b in filt_bets if b.get("result") == filter_result]
+            if filter_market != "All": filt_bets = [b for b in filt_bets if b.get("market") == filter_market]
+            if filter_book   != "All": filt_bets = [b for b in filt_bets if b.get("book") == filter_book]
 
-        # Update result
-        st.markdown('<div class="section-header">Update Bet Result</div>', unsafe_allow_html=True)
-        col_u1, col_u2, col_u3, col_u4 = st.columns(4)
-        with col_u1:
-            update_id = st.selectbox("Select Bet ID",
-                [f"{b['ID']} — {b['Player']} {b['Market']}" for b in bet_rows],
-                key="upd_id")
-        with col_u2:
-            new_result = st.selectbox("Result", ["Win","Loss","Push","Void"], key="upd_result")
-        with col_u3:
-            selected_bet = next((b for b in bets if str(b.get("id")) == update_id.split(" — ")[0]), {})
-            if new_result == "Win":
-                default_pl = float(selected_bet.get("to_win", 0))
-            elif new_result == "Loss":
-                default_pl = -float(selected_bet.get("stake", 0))
-            else:
-                default_pl = 0.0
-            new_pl = st.number_input("P&L ($)", value=default_pl, step=1.0, key="upd_pl")
-        with col_u4:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("✅ Update", key="upd_btn"):
-                try:
-                    sb = get_supabase()
-                    bet_id = int(update_id.split(" — ")[0])
-                    sb.table("bets").update({
-                        "result": new_result,
-                        "profit_loss": float(new_pl)
-                    }).eq("id", bet_id).execute()
-                    st.success(f"Updated bet #{bet_id} → {new_result} ${new_pl:+.2f}")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Update failed: {e}")
-    else:
+            bet_rows = []
+            for b in filt_bets:
+                odds = b.get("odds", 0)
+                bet_rows.append({
+                    "ID":       b.get("id"),
+                    "Player":   b.get("player_name",""),
+                    "Market":   b.get("market",""),
+                    "Book":     b.get("book",""),
+                    "Odds":     f"+{odds}" if odds > 0 else str(odds),
+                    "Stake":    b.get("stake",0),
+                    "To Win":   b.get("to_win",0),
+                    "Edge%":    b.get("edge_at_bet",0) or 0,
+                    "Round":    b.get("round",""),
+                    "Result":   b.get("result","Pending"),
+                    "P&L":      b.get("profit_loss",0) or 0,
+                    "Notes":    (b.get("notes","") or "")[:40],
+                })
+
+            df_bets = pd.DataFrame(bet_rows)
+
+            def color_result(val):
+                if val == "Win":  return "color:#69f0ae; font-weight:700"
+                if val == "Loss": return "color:#ef9a9a; font-weight:600"
+                if val == "Push": return "color:#ffcc02"
+                return "color:#90a4ae"
+            def color_pl(val):
+                if isinstance(val,(int,float)):
+                    if val > 0: return "color:#69f0ae; font-weight:600"
+                    if val < 0: return "color:#ef9a9a"
+                return ""
+
+            styled_bets = df_bets.drop(columns=["ID"]).style\
+                .map(color_result, subset=["Result"])\
+                .map(color_pl, subset=["P&L"])\
+                .format({"Stake":"${:.2f}","To Win":"${:.2f}",
+                         "Edge%":"{:+.1f}%","P&L":"${:+.2f}"}, na_rep="—")
+            st.dataframe(styled_bets, use_container_width=True, hide_index=True, height=400)
+
+            # ── Update result ──────────────────────────────────
+            st.markdown('<div class="section-header">Update Result</div>', unsafe_allow_html=True)
+            if bet_rows:
+                uc1, uc2, uc3, uc4 = st.columns(4)
+                with uc1:
+                    upd_sel = st.selectbox("Bet",
+                        [f"#{b['ID']} — {b['Player']} {b['Market']} {b['Odds']}" for b in bet_rows],
+                        key="upd_sel")
+                with uc2:
+                    upd_result = st.selectbox("Result", ["Win","Loss","Push","Void"], key="upd_res")
+                with uc3:
+                    sel_id  = int(upd_sel.split("—")[0].replace("#","").strip())
+                    sel_bet = next((b for b in bets if b.get("id") == sel_id), {})
+                    if upd_result == "Win":   def_pl = float(sel_bet.get("to_win",0))
+                    elif upd_result == "Loss":def_pl = -float(sel_bet.get("stake",0))
+                    else:                     def_pl = 0.0
+                    upd_pl = st.number_input("P&L ($)", value=def_pl, step=1.0, key="upd_pl2")
+                with uc4:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("✅ Update", key="upd_btn2"):
+                        try:
+                            sb = get_supabase()
+                            sb.table("bets").update({"result":upd_result,"profit_loss":float(upd_pl)}).eq("id",sel_id).execute()
+                            st.success(f"Updated #{sel_id} → {upd_result} ${upd_pl:+.2f}")
+                            st.cache_data.clear()
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
+
+    # ── LEARNING ANALYTICS ────────────────────────────────────
+    with r_tab3:
+        if len(settled) < 3:
+            st.info("Need at least 3 settled bets to show learning analytics. Log and settle some bets first.")
+        else:
+            st.markdown('<div class="section-header">📊 Edge Tier Performance — Are the sharp plays actually hitting?</div>', unsafe_allow_html=True)
+
+            # Edge tier breakdown
+            def edge_tier(e):
+                e = float(e or 0)
+                if e >= 5:   return "🔥🔥 STRONG (5%+)"
+                if e >= 3:   return "🔥 SHARP (3-5%)"
+                if e >= 2:   return "✅ VALUE (2-3%)"
+                if e >= 0:   return "Below Threshold"
+                return "Manual / No Edge"
+
+            tier_stats = {}
+            for b in settled:
+                tier = edge_tier(b.get("edge_at_bet", 0))
+                if tier not in tier_stats:
+                    tier_stats[tier] = {"bets":0,"wins":0,"staked":0,"pl":0}
+                tier_stats[tier]["bets"]   += 1
+                tier_stats[tier]["wins"]   += 1 if b.get("result") == "Win" else 0
+                tier_stats[tier]["staked"] += float(b.get("stake",0) or 0)
+                tier_stats[tier]["pl"]     += float(b.get("profit_loss",0) or 0)
+
+            tier_rows = []
+            for tier, s in sorted(tier_stats.items(), key=lambda x: -x[1]["staked"]):
+                wr = round(s["wins"]/s["bets"]*100,1) if s["bets"] else 0
+                roi = round(s["pl"]/s["staked"]*100,1) if s["staked"] else 0
+                tier_rows.append({
+                    "Edge Tier":    tier,
+                    "Bets":         s["bets"],
+                    "Wins":         s["wins"],
+                    "Win Rate":     wr,
+                    "Staked":       s["staked"],
+                    "P&L":          s["pl"],
+                    "ROI":          roi,
+                    "Verdict":      "✅ TAKE" if roi > 5 and wr > 30 else ("⚠️ WATCH" if roi > 0 else "❌ AVOID"),
+                })
+
+            df_tiers = pd.DataFrame(tier_rows)
+
+            def color_verdict(val):
+                if "TAKE"  in str(val): return "color:#69f0ae; font-weight:700"
+                if "WATCH" in str(val): return "color:#ffcc02; font-weight:600"
+                if "AVOID" in str(val): return "color:#ef9a9a; font-weight:600"
+                return ""
+            def color_roi(val):
+                if isinstance(val,(int,float)):
+                    if val > 5:  return "color:#69f0ae; font-weight:600"
+                    if val > 0:  return "color:#a5d6a7"
+                    return "color:#ef9a9a"
+                return ""
+
+            st.dataframe(df_tiers.style
+                .map(color_verdict, subset=["Verdict"])
+                .map(color_roi, subset=["ROI"])
+                .format({"Win Rate":"{:.1f}%","Staked":"${:.2f}","P&L":"${:+.2f}","ROI":"{:+.1f}%"}, na_rep="—"),
+                use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown('<div class="section-header">📈 Market Performance — Which markets are profitable?</div>', unsafe_allow_html=True)
+
+            mkt_stats = {}
+            for b in settled:
+                mkt = b.get("market","Unknown")
+                if mkt not in mkt_stats:
+                    mkt_stats[mkt] = {"bets":0,"wins":0,"staked":0,"pl":0}
+                mkt_stats[mkt]["bets"]   += 1
+                mkt_stats[mkt]["wins"]   += 1 if b.get("result") == "Win" else 0
+                mkt_stats[mkt]["staked"] += float(b.get("stake",0) or 0)
+                mkt_stats[mkt]["pl"]     += float(b.get("profit_loss",0) or 0)
+
+            mkt_rows = []
+            for mkt, s in sorted(mkt_stats.items(), key=lambda x: -x[1]["pl"]):
+                wr  = round(s["wins"]/s["bets"]*100,1) if s["bets"] else 0
+                roi = round(s["pl"]/s["staked"]*100,1) if s["staked"] else 0
+                mkt_rows.append({
+                    "Market":   mkt,
+                    "Bets":     s["bets"],
+                    "Win Rate": wr,
+                    "Staked":   s["staked"],
+                    "P&L":      s["pl"],
+                    "ROI":      roi,
+                })
+
+            st.dataframe(pd.DataFrame(mkt_rows).style
+                .map(color_roi, subset=["ROI"])
+                .format({"Win Rate":"{:.1f}%","Staked":"${:.2f}","P&L":"${:+.2f}","ROI":"{:+.1f}%"}, na_rep="—"),
+                use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown('<div class="section-header">📚 Book Performance — Where are you getting best value?</div>', unsafe_allow_html=True)
+
+            book_stats = {}
+            for b in settled:
+                book = b.get("book","Unknown")
+                if book not in book_stats:
+                    book_stats[book] = {"bets":0,"wins":0,"staked":0,"pl":0}
+                book_stats[book]["bets"]   += 1
+                book_stats[book]["wins"]   += 1 if b.get("result") == "Win" else 0
+                book_stats[book]["staked"] += float(b.get("stake",0) or 0)
+                book_stats[book]["pl"]     += float(b.get("profit_loss",0) or 0)
+
+            book_rows = []
+            for book, s in sorted(book_stats.items(), key=lambda x: -x[1]["pl"]):
+                wr  = round(s["wins"]/s["bets"]*100,1) if s["bets"] else 0
+                roi = round(s["pl"]/s["staked"]*100,1) if s["staked"] else 0
+                book_rows.append({"Book":book,"Bets":s["bets"],"Win Rate":wr,
+                                  "Staked":s["staked"],"P&L":s["pl"],"ROI":roi})
+            st.dataframe(pd.DataFrame(book_rows).style
+                .map(color_roi, subset=["ROI"])
+                .format({"Win Rate":"{:.1f}%","Staked":"${:.2f}","P&L":"${:+.2f}","ROI":"{:+.1f}%"}, na_rep="—"),
+                use_container_width=True, hide_index=True)
+
+    # ── MODEL RECOMMENDATIONS ─────────────────────────────────
+    with r_tab4:
+        st.markdown('<div class="section-header">🎯 What Should You Take This Week?</div>', unsafe_allow_html=True)
+
         st.markdown("""<div class="info-box">
-            No bets logged yet. Use the form above to log your first bet.<br>
-            If you see an error, run the SQL shown to create the bets table in Supabase first.
+            Based on your historical results, here are the plays the model recommends
+            taking this week. Recommendations update as you log and settle more bets —
+            the system learns which edge tiers and markets are genuinely profitable for you.
         </div>""", unsafe_allow_html=True)
+
+        # Build recommended plays from current field data
+        rec_rows = []
+        for p in field_players:
+            for prob_key, odds_key, bk_key, market, mkt_label in [
+                ("w_dg_p",  "w_best",   "w_bk",   "win",      "Win"),
+                ("t5_p",    "t5_best",  "t5_bk",  "top_5",    "Top 5"),
+                ("t10_p",   "t10_best", "t10_bk", "top_10",   "Top 10"),
+                ("c_p",     "c_best",   "c_bk",   "make_cut", "Make Cut"),
+            ]:
+                prob = p.get(prob_key)
+                odds = p.get(odds_key)
+                if not prob or not odds: continue
+                e, sv = sharp_value(prob, odds, market)
+                if not sv: continue
+
+                # Check if historical performance supports this tier
+                tier  = edge_tier(e)
+                hist  = tier_stats.get(tier, {}) if len(settled) >= 3 else {}
+                hist_roi = round(hist.get("pl",0)/hist.get("staked",1)*100,1) if hist.get("staked") else None
+                hist_note = f"Hist ROI: {hist_roi:+.1f}%" if hist_roi is not None else "No history yet"
+
+                # Only recommend if no negative history
+                if hist_roi is not None and hist_roi < -15:
+                    continue
+
+                rec_rows.append({
+                    "Player":      p["name"],
+                    "Market":      mkt_label,
+                    "DG Prob%":    round(prob, 2),
+                    "Best Odds":   fmt_odds(odds),
+                    "Best Book":   (p.get(bk_key) or "").title(),
+                    "Edge%":       round(e, 2),
+                    "Sharp Value": sv,
+                    "History":     hist_note,
+                    "Confidence":  "🔥🔥 HIGH" if (hist_roi or 0) > 5 else ("🔥 MEDIUM" if sv else "✅ LOW"),
+                })
+
+        if rec_rows:
+            df_rec = pd.DataFrame(rec_rows).sort_values("Edge%", ascending=False)
+
+            def color_conf(val):
+                if "HIGH"   in str(val): return "color:#69f0ae; font-weight:700"
+                if "MEDIUM" in str(val): return "color:#ffcc02; font-weight:600"
+                return "color:#90a4ae"
+
+            styled_rec = df_rec.style\
+                .map(color_sharp, subset=["Sharp Value"])\
+                .map(color_conf,  subset=["Confidence"])\
+                .format({"DG Prob%":"{:.2f}%","Edge%":"{:+.2f}%"}, na_rep="—")
+
+            st.dataframe(styled_rec, use_container_width=True, hide_index=True, height=500)
+
+            st.markdown(f"""<div class="info-box">
+                {len(df_rec)} recommended plays above threshold ·
+                Confidence is based on your historical ROI for each edge tier ·
+                As you log more bets the system learns which tiers to trust
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""<div class="info-box">
+                No plays above threshold right now, or all edge tiers have negative historical ROI.
+                Check the Finish Odds + Edge and Best H2H Plays tabs for current opportunities.
+            </div>""", unsafe_allow_html=True)
 
 
 # ════════════════════════════════════════════════════════════

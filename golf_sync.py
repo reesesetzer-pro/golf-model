@@ -601,6 +601,7 @@ def sync_finish_odds(tour: str = "pga"):
         players  = data.get("odds", [])
         rows = []
         for p in players:
+            if not isinstance(p, dict): continue
             # Find best odds (highest American = best value for bettors)
             book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365"]
             book_odds = {k: p.get(k) for k in book_cols if p.get(k)}
