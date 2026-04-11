@@ -590,6 +590,17 @@ def sync_live_predictions(tour: str = "pga"):
     })
     if not data:
         return
+
+    def clean_num(val):
+        if val is None or val in ("n/a", "N/A"): return None
+        try: return float(val)
+        except: return None
+
+    def clean_int(val):
+        if val is None or val in ("n/a", "N/A"): return None
+        try: return int(float(str(val).replace("T","").replace("t","")))
+        except: return None
+
     event_id = str(data.get("event_id", "current"))
     players  = data.get("data", [])
     rows = [
@@ -597,13 +608,13 @@ def sync_live_predictions(tour: str = "pga"):
             "dg_id":         p.get("dg_id"),
             "event_id":      event_id,
             "player_name":   p.get("player_name"),
-            "current_pos":   p.get("current_pos"),
-            "current_score": p.get("current_score"),
-            "thru":          p.get("thru"),
-            "win_prob":      p.get("win"),
-            "top5_prob":     p.get("top_5"),
-            "top10_prob":    p.get("top_10"),
-            "make_cut_prob": p.get("make_cut"),
+            "current_pos":   clean_int(p.get("current_pos")),
+            "current_score": clean_int(p.get("current_score")),
+            "thru":          clean_int(p.get("thru")),
+            "win_prob":      clean_num(p.get("win")),
+            "top5_prob":     clean_num(p.get("top_5")),
+            "top10_prob":    clean_num(p.get("top_10")),
+            "make_cut_prob": clean_num(p.get("make_cut")),
             "updated_at":    now_utc(),
         }
         for p in players
