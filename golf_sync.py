@@ -157,6 +157,23 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def american_to_prob(val) -> float | None:
+    """Convert American odds (int, float, or string) to implied probability (0–1 decimal).
+    Returns None for 'n/a', None, empty, or invalid values."""
+    if val is None:
+        return None
+    try:
+        o = float(val)
+    except (TypeError, ValueError):
+        return None  # handles 'n/a', '', etc.
+    if o == 0:
+        return None
+    if o > 0:
+        return round(100 / (o + 100), 6)
+    else:
+        return round(abs(o) / (abs(o) + 100), 6)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TABLE SETUP  (run once with --mode setup)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -259,6 +276,8 @@ create table if not exists predictions (
 );
 
 -- Live (in-tournament) predictions
+-- Probs stored as decimal (0–1). App multiplies by 100 for display.
+-- Raw American odds stored in *_odds columns for reference.
 create table if not exists live_predictions (
     dg_id           integer,
     event_id        text,
@@ -266,13 +285,31 @@ create table if not exists live_predictions (
     current_pos     integer,
     current_score   integer,
     thru            integer,
-    win_prob        numeric,
+    today           integer,
+    round_num       integer,
+    win_prob        numeric,   -- decimal 0–1, e.g. 0.185
     top5_prob       numeric,
     top10_prob      numeric,
+    top20_prob      numeric,
     make_cut_prob   numeric,
+    win_odds        text,      -- raw American e.g. "-225"
+    top5_odds       text,
+    top10_odds      text,
+    top20_odds      text,
+    make_cut_odds   text,
     updated_at      timestamptz default now(),
     primary key (dg_id, event_id)
 );
+
+-- If upgrading existing live_predictions table, run these ALTERs:
+-- alter table live_predictions add column if not exists top20_prob numeric;
+-- alter table live_predictions add column if not exists today integer;
+-- alter table live_predictions add column if not exists round_num integer;
+-- alter table live_predictions add column if not exists win_odds text;
+-- alter table live_predictions add column if not exists top5_odds text;
+-- alter table live_predictions add column if not exists top10_odds text;
+-- alter table live_predictions add column if not exists top20_odds text;
+-- alter table live_predictions add column if not exists make_cut_odds text;
 
 -- DataGolf matchup odds
 create table if not exists matchup_odds (
@@ -364,6 +401,74 @@ create table if not exists bets (
     result          text default 'Pending',
     profit_loss     numeric default 0,
     logged_at       timestamptz default now()
+);
+
+-- Tournament results — final finish positions for each event
+-- Used to auto-settle bets and calibrate model accuracy
+create table if not exists tournament_results (
+    id              bigserial primary key,
+    dg_id           integer,
+    event_id        text,
+    event_name      text,
+    season          integer,
+    player_name     text,
+    finish_pos      integer,       -- official finish position (1 = win)
+    finish_pos_text text,          -- e.g. "T4", "MC", "WD"
+    made_cut        boolean,
+    top_5           boolean,
+    top_10          boolean,
+    top_20          boolean,
+    score_r1        integer,
+    score_r2        integer,
+    score_r3        integer,
+    score_r4        integer,
+    total_score     integer,
+    pre_win_prob    numeric,       -- model probability at time of prediction
+    pre_top10_prob  numeric,
+    updated_at      timestamptz default now(),
+    unique (dg_id, event_id)
+);
+
+-- Edge accuracy log — track every sharp play the model surfaces
+-- One row per player+market+sync that clears the sharp threshold
+-- Allows end-of-season calibration: did 5% edge plays actually hit at +EV?
+create table if not exists edge_log (
+    id              bigserial primary key,
+    event_id        text,
+    event_name      text,
+    dg_id           integer,
+    player_name     text,
+    market          text,         -- win, top_5, top_10, top_20, make_cut, h2h
+    model_prob      numeric,      -- decimal 0–1
+    book_implied    numeric,      -- decimal 0–1
+    edge_pct        numeric,      -- model_prob - book_implied, in %
+    edge_tier       text,         -- STRONG / SHARP / VALUE
+    best_odds       integer,
+    best_book       text,
+    is_live         boolean,      -- true if model_prob from live_predictions
+    outcome         text,         -- WIN / LOSS / PUSH / NULL (pending)
+    logged_at       timestamptz default now()
+);
+
+-- Prediction snapshots — archive model state at start of each tournament
+-- Lets you compare pre-tourney model probs to final results over time
+create table if not exists prediction_snapshots (
+    id              bigserial primary key,
+    event_id        text,
+    event_name      text,
+    season          integer,
+    snapshot_type   text,         -- 'pre' or 'live_r1', 'live_r2', etc.
+    dg_id           integer,
+    player_name     text,
+    win_prob        numeric,
+    top5_prob       numeric,
+    top10_prob      numeric,
+    top20_prob      numeric,
+    make_cut_prob   numeric,
+    current_pos     integer,      -- null for pre-tourney
+    current_score   integer,      -- null for pre-tourney
+    snapped_at      timestamptz default now(),
+    unique (event_id, snapshot_type, dg_id)
 );
 """
 
@@ -582,6 +687,17 @@ def sync_predictions(tour: str = "pga"):
 
 
 def sync_live_predictions(tour: str = "pga"):
+    """Pull DataGolf in-play predictions and store as decimal probabilities (0–1).
+    
+    DataGolf returns American odds strings e.g. "-225", "+450", or "n/a".
+    We convert all to decimal probability before storing so the app can do
+    simple arithmetic (prob * 100 = percent) without re-converting.
+    
+    Supabase live_predictions schema expects:
+      win_prob, top5_prob, top10_prob, top20_prob, make_cut_prob  → float/numeric (0–1)
+      win_odds, top5_odds, top10_odds, top20_odds, make_cut_odds  → text (raw American)
+      current_pos, current_score, thru, today, round_num          → integer/text
+    """
     log.info(f"Syncing live predictions ({tour})...")
     data = dg_get("preds/in-play", {
         "tour":        tour,
@@ -589,26 +705,58 @@ def sync_live_predictions(tour: str = "pga"):
         "odds_format": "american",
     })
     if not data:
+        log.error("sync_live_predictions: dg_get returned None")
         return
+
     event_id = str(data.get("event_id", "current"))
     players  = data.get("data", [])
-    rows = [
-        {
-            "dg_id":         p.get("dg_id"),
-            "event_id":      event_id,
-            "player_name":   p.get("player_name"),
-            "current_pos":   p.get("current_pos"),
-            "current_score": p.get("current_score"),
-            "thru":          p.get("thru"),
-            "win_prob":      p.get("win"),
-            "top5_prob":     p.get("top_5"),
-            "top10_prob":    p.get("top_10"),
-            "make_cut_prob": p.get("make_cut"),
-            "updated_at":    now_utc(),
-        }
-        for p in players
-        if p.get("dg_id")
-    ]
+
+    if not players:
+        log.warning(f"sync_live_predictions: empty data — response keys: {list(data.keys())}")
+        return
+
+    rows = []
+    for p in players:
+        if not p.get("dg_id"):
+            continue
+
+        # Raw American odds (stored as text, 'n/a' preserved)
+        raw_win  = p.get("win")
+        raw_t5   = p.get("top_5")
+        raw_t10  = p.get("top_10")
+        raw_t20  = p.get("top_20")
+        raw_cut  = p.get("make_cut")
+
+        # Numeric score fields — DataGolf sometimes returns these as strings too
+        def safe_int(v):
+            try: return int(v)
+            except (TypeError, ValueError): return None
+
+        rows.append({
+            "dg_id":          p.get("dg_id"),
+            "event_id":       event_id,
+            "player_name":    p.get("player_name"),
+            "current_pos":    safe_int(p.get("current_pos")),
+            "current_score":  safe_int(p.get("current_score")),
+            "thru":           safe_int(p.get("thru")),
+            "today":          safe_int(p.get("today")),
+            "round_num":      safe_int(p.get("round")),
+            # Decimal probabilities (0–1) for arithmetic in the app
+            "win_prob":       american_to_prob(raw_win),
+            "top5_prob":      american_to_prob(raw_t5),
+            "top10_prob":     american_to_prob(raw_t10),
+            "top20_prob":     american_to_prob(raw_t20),
+            "make_cut_prob":  american_to_prob(raw_cut),
+            # Raw American odds stored as text — useful for display
+            "win_odds":       str(raw_win)  if raw_win  is not None else None,
+            "top5_odds":      str(raw_t5)   if raw_t5   is not None else None,
+            "top10_odds":     str(raw_t10)  if raw_t10  is not None else None,
+            "top20_odds":     str(raw_t20)  if raw_t20  is not None else None,
+            "make_cut_odds":  str(raw_cut)  if raw_cut  is not None else None,
+            "updated_at":     now_utc(),
+        })
+
+    log.info(f"sync_live_predictions: {len(rows)} players — sample: {rows[0] if rows else 'none'}")
     upsert("live_predictions", rows, "dg_id,event_id")
 
 
@@ -796,8 +944,18 @@ def _normalize_name(name: str) -> str:
     return name
 
 def sync_odds_api_to_finish_odds():
-    """Pull live finish position odds from The Odds API and overwrite finish_odds.
-    This replaces stale DataGolf outrights data with real-time book lines."""
+    """Pull live finish position odds from The Odds API and upsert into finish_odds.
+    
+    Covers all 4 majors across all 5 markets (win/top5/top10/top20/make_cut).
+    Uses player_name as the match key since Odds API has no dg_id.
+    
+    IMPORTANT: finish_odds table needs a unique constraint on (event_id, market, player_name)
+    in addition to (or instead of) the dg_id-based primary key.
+    Run this in Supabase SQL editor once:
+      alter table finish_odds add column if not exists dg_id integer default null;
+      create unique index if not exists finish_odds_name_idx
+        on finish_odds (event_id, market, player_name);
+    """
     log.info("Syncing finish odds from The Odds API (live lines)...")
     book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
     now = now_utc()
@@ -813,14 +971,14 @@ def sync_odds_api_to_finish_odds():
             continue
 
         for event in data:
-            # Build player → book odds dict
             player_odds: dict[str, dict] = {}
             for bm in event.get("bookmakers", []):
                 book = bm.get("key")
-                if book not in book_cols: continue
+                if book not in book_cols:
+                    continue
                 for mkt in bm.get("markets", []):
                     for outcome in mkt.get("outcomes", []):
-                        name = _normalize_name(outcome.get("name", ""))
+                        name  = _normalize_name(outcome.get("name", ""))
                         price = outcome.get("price")
                         if name and price:
                             player_odds.setdefault(name, {})[book] = int(price)
@@ -828,7 +986,6 @@ def sync_odds_api_to_finish_odds():
             if not player_odds:
                 continue
 
-            # Build rows for finish_odds upsert
             rows = []
             for player_name, odds in player_odds.items():
                 best_book = max(odds, key=lambda k: odds[k]) if odds else None
@@ -847,15 +1004,15 @@ def sync_odds_api_to_finish_odds():
                 rows.append(row)
 
             if rows:
-                # Upsert by player_name + market (no dg_id available from Odds API)
                 try:
+                    # Upsert by (event_id, market, player_name) — dg_id may be null
                     supabase.table("finish_odds").upsert(
                         rows,
                         on_conflict="event_id,market,player_name"
                     ).execute()
-                    log.info(f"  ✓ finish_odds ({market} via Odds API) — {len(rows)} rows")
+                    log.info(f"  ✓ finish_odds ({sport_key} → {market}) — {len(rows)} rows")
                 except Exception as e:
-                    log.warning(f"  finish_odds upsert failed for {market}: {e}")
+                    log.warning(f"  finish_odds upsert failed for {sport_key}/{market}: {e}")
         time.sleep(0.3)
 
 
@@ -895,6 +1052,283 @@ def sync_book_odds():
     upsert("book_odds", all_rows, "event_id,market,bookmaker,p1_name,p2_name")
 
 
+def snapshot_predictions(snapshot_type: str = "pre", tour: str = "pga"):
+    """Archive current predictions into prediction_snapshots for season-long calibration.
+    
+    Call with snapshot_type='pre' before tournament starts.
+    Call with snapshot_type='live_r1', 'live_r2' etc. during rounds.
+    """
+    log.info(f"Snapshotting predictions ({snapshot_type})...")
+    if snapshot_type == "pre":
+        data = dg_get("preds/pre-tournament", {"tour": tour, "odds_format": "american"})
+        if not data:
+            return
+        event_id   = str(data.get("event_id", "current"))
+        event_name = data.get("event_name", "")
+        players    = data.get("baseline", [])
+        course     = {p["dg_id"]: p for p in data.get("baseline_history_fit", [])}
+
+        # Grab schedule for event_name if missing
+        rows = []
+        for p in players:
+            did = p.get("dg_id")
+            cp  = course.get(did, {})
+            rows.append({
+                "event_id":       event_id,
+                "event_name":     event_name,
+                "season":         2026,
+                "snapshot_type":  snapshot_type,
+                "dg_id":          did,
+                "player_name":    p.get("player_name"),
+                "win_prob":       american_to_prob(p.get("win")),
+                "top5_prob":      american_to_prob(p.get("top_5")),
+                "top10_prob":     american_to_prob(p.get("top_10")),
+                "top20_prob":     american_to_prob(p.get("top_20")),
+                "make_cut_prob":  american_to_prob(p.get("make_cut")),
+                "current_pos":    None,
+                "current_score":  None,
+            })
+    else:
+        # Live snapshot from in-play data
+        data = dg_get("preds/in-play", {"tour": tour, "dead_heat": "false", "odds_format": "american"})
+        if not data:
+            return
+        event_id   = str(data.get("event_id", "current"))
+        event_name = data.get("event_name", "")
+        players    = data.get("data", [])
+        rows = []
+        for p in players:
+            def safe_int(v):
+                try: return int(v)
+                except: return None
+            rows.append({
+                "event_id":       event_id,
+                "event_name":     event_name,
+                "season":         2026,
+                "snapshot_type":  snapshot_type,
+                "dg_id":          p.get("dg_id"),
+                "player_name":    p.get("player_name"),
+                "win_prob":       american_to_prob(p.get("win")),
+                "top5_prob":      american_to_prob(p.get("top_5")),
+                "top10_prob":     american_to_prob(p.get("top_10")),
+                "top20_prob":     american_to_prob(p.get("top_20")),
+                "make_cut_prob":  american_to_prob(p.get("make_cut")),
+                "current_pos":    safe_int(p.get("current_pos")),
+                "current_score":  safe_int(p.get("current_score")),
+            })
+
+    upsert("prediction_snapshots", rows, "event_id,snapshot_type,dg_id")
+
+
+def sync_tournament_results(tour: str = "pga", event_id: str = "current"):
+    """Pull final leaderboard results after tournament ends and store in tournament_results.
+    Also auto-settles any matching Pending bets.
+    
+    Call this after Sunday's final round completes.
+    """
+    log.info(f"Syncing tournament results ({tour} event={event_id})...")
+    data = dg_get("preds/in-play", {"tour": tour, "dead_heat": "false", "odds_format": "american"})
+    if not data:
+        return
+
+    ev_id      = str(data.get("event_id", event_id))
+    event_name = data.get("event_name", "")
+    players    = data.get("data", [])
+
+    # Grab pre-tourney probs for comparison
+    pre_snap = supabase.table("prediction_snapshots") \
+        .select("dg_id, win_prob, top10_prob") \
+        .eq("event_id", ev_id) \
+        .eq("snapshot_type", "pre") \
+        .execute().data
+    pre_by_id = {r["dg_id"]: r for r in pre_snap}
+
+    rows = []
+    for p in players:
+        did   = p.get("dg_id")
+        pos   = p.get("current_pos")
+        score = p.get("current_score")
+        try: pos_int = int(pos) if pos not in (None, "n/a", "") else None
+        except: pos_int = None
+
+        pre = pre_by_id.get(did, {})
+        rows.append({
+            "dg_id":          did,
+            "event_id":       ev_id,
+            "event_name":     event_name,
+            "season":         2026,
+            "player_name":    p.get("player_name"),
+            "finish_pos":     pos_int,
+            "finish_pos_text":str(pos) if pos else None,
+            "made_cut":       p.get("make_cut") != "n/a",
+            "top_5":          pos_int is not None and pos_int <= 5,
+            "top_10":         pos_int is not None and pos_int <= 10,
+            "top_20":         pos_int is not None and pos_int <= 20,
+            "score_r1":       p.get("R1"),
+            "score_r2":       p.get("R2"),
+            "score_r3":       p.get("R3"),
+            "score_r4":       p.get("R4"),
+            "total_score":    score,
+            "pre_win_prob":   pre.get("win_prob"),
+            "pre_top10_prob": pre.get("top10_prob"),
+            "updated_at":     now_utc(),
+        })
+
+    if rows:
+        upsert("tournament_results", rows, "dg_id,event_id")
+        log.info(f"tournament_results — {len(rows)} rows")
+        # Auto-settle pending bets for this event
+        _auto_settle_bets(ev_id, rows)
+
+
+def _auto_settle_bets(event_id: str, results: list[dict]):
+    """Auto-settle Pending bets by matching player_name + market against tournament_results."""
+    try:
+        pending = supabase.table("bets") \
+            .select("*") \
+            .eq("result", "Pending") \
+            .execute().data
+    except Exception as e:
+        log.error(f"auto_settle: could not fetch pending bets: {e}")
+        return
+
+    results_by_name = {r["player_name"]: r for r in results}
+    settled_count = 0
+
+    for bet in pending:
+        player = bet.get("player_name", "")
+        market = (bet.get("market") or "").lower()
+        result_row = results_by_name.get(player)
+        if not result_row:
+            continue  # player name mismatch — skip, settle manually
+
+        outcome = None
+        if market in ("win", "tournament winner"):
+            outcome = "Win" if result_row.get("finish_pos") == 1 else "Loss"
+        elif market in ("top 5", "top5"):
+            outcome = "Win" if result_row.get("top_5") else "Loss"
+        elif market in ("top 10", "top10"):
+            outcome = "Win" if result_row.get("top_10") else "Loss"
+        elif market in ("top 20", "top20"):
+            outcome = "Win" if result_row.get("top_20") else "Loss"
+        elif market in ("make cut", "make_cut"):
+            outcome = "Win" if result_row.get("made_cut") else "Loss"
+
+        if not outcome:
+            continue  # H2H or unknown market — skip
+
+        odds    = float(bet.get("odds", 0))
+        stake   = float(bet.get("stake", 0))
+        pl = round((stake * odds / 100) if (outcome == "Win" and odds > 0)
+                   else (stake * 100 / abs(odds)) if (outcome == "Win" and odds < 0)
+                   else -stake, 2)
+
+        try:
+            supabase.table("bets").update({
+                "result":       outcome,
+                "profit_loss":  pl,
+            }).eq("id", bet["id"]).execute()
+            settled_count += 1
+        except Exception as e:
+            log.error(f"auto_settle: failed to update bet #{bet['id']}: {e}")
+
+    log.info(f"auto_settle: settled {settled_count}/{len(pending)} pending bets")
+
+
+def log_sharp_plays():
+    """Snapshot all current sharp plays into edge_log for season-long calibration.
+    Call once per sync during rounds. Outcome will be filled by _auto_settle_bets.
+    """
+    log.info("Logging sharp plays to edge_log...")
+    try:
+        fin_odds = supabase.table("finish_odds").select("*").execute().data
+        live_preds = supabase.table("live_predictions").select("*").execute().data
+        pre_preds  = supabase.table("predictions").select("*").execute().data
+    except Exception as e:
+        log.error(f"log_sharp_plays: fetch failed: {e}")
+        return
+
+    live_by_id = {r["dg_id"]: r for r in live_preds}
+    pre_by_id  = {(r["dg_id"], r.get("event_id")): r for r in pre_preds}
+
+    THRESHOLDS = {"win": 2.0, "top_5": 3.0, "top_10": 3.5, "top_20": 4.0, "make_cut": 5.0}
+    BOOK_COLS  = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
+
+    rows = []
+    seen = set()
+    for fo in fin_odds:
+        dg_id   = fo.get("dg_id")
+        market  = fo.get("market")
+        event_id = fo.get("event_id")
+        if not dg_id or not market:
+            continue
+
+        # Get model prob — live if available, else pre-tourney
+        lp  = live_by_id.get(dg_id, {})
+        live_prob_map = {"win": lp.get("win_prob"), "top_5": lp.get("top5_prob"),
+                         "top_10": lp.get("top10_prob"), "top_20": lp.get("top20_prob"),
+                         "make_cut": lp.get("make_cut_prob")}
+        model_prob = live_prob_map.get(market)
+        is_live = model_prob is not None
+
+        if not model_prob:
+            # Fall back to pre-tourney
+            pp = pre_by_id.get((dg_id, event_id), {})
+            pre_map = {"win": pp.get("baseline_win"), "top_5": pp.get("baseline_top5"),
+                       "top_10": pp.get("baseline_top10"), "top_20": pp.get("baseline_top20"),
+                       "make_cut": pp.get("baseline_make_cut")}
+            raw = pre_map.get(market)
+            model_prob = american_to_prob(raw) if raw else None
+
+        if not model_prob:
+            continue
+
+        threshold = THRESHOLDS.get(market, 2.0)
+
+        # Check each book
+        for col in BOOK_COLS:
+            book_odds = fo.get(col)
+            if not book_odds:
+                continue
+            book_impl = american_to_prob(book_odds)
+            if not book_impl:
+                continue
+            edge = round((model_prob - book_impl) * 100, 3)
+            if edge < threshold:
+                continue
+
+            tier = ("STRONG" if edge >= threshold + 3 else
+                    "SHARP"  if edge >= threshold + 1 else "VALUE")
+
+            key = (dg_id, market, col, event_id)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            rows.append({
+                "event_id":    event_id,
+                "dg_id":       dg_id,
+                "player_name": fo.get("player_name"),
+                "market":      market,
+                "model_prob":  round(model_prob, 6),
+                "book_implied":round(book_impl, 6),
+                "edge_pct":    edge,
+                "edge_tier":   tier,
+                "best_odds":   int(book_odds),
+                "best_book":   col,
+                "is_live":     is_live,
+                "outcome":     None,
+                "logged_at":   now_utc(),
+            })
+
+    if rows:
+        try:
+            supabase.table("edge_log").insert(rows).execute()
+            log.info(f"edge_log — {len(rows)} sharp plays logged")
+        except Exception as e:
+            log.error(f"edge_log insert failed: {e}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -914,6 +1348,7 @@ def full_sync():
     sync_historical_odds(year=2026)
     sync_historical_odds(year=2025)
     sync_book_odds()
+    log_sharp_plays()
     log.info("━━━  FULL SYNC COMPLETE  ━━━")
 
 
@@ -926,6 +1361,7 @@ def live_sync():
     sync_odds_api_to_finish_odds()
     sync_matchup_odds()
     sync_book_odds()
+    log_sharp_plays()
     log.info("━━━  LIVE SYNC COMPLETE  ━━━")
 
 
@@ -936,6 +1372,7 @@ def pre_sync():
     sync_field()
     sync_skill_ratings()
     sync_predictions()
+    snapshot_predictions(snapshot_type="pre")
     sync_finish_odds()
     sync_matchup_odds(market="tournament_matchups")
     sync_matchup_odds(market="round_matchups")
@@ -943,13 +1380,20 @@ def pre_sync():
     log.info("━━━  PRE-TOURNAMENT SYNC COMPLETE  ━━━")
 
 
+def results_sync():
+    """Run after Sunday's final round to settle bets and archive results."""
+    log.info("━━━  GOLF SYNC — RESULTS  ━━━")
+    sync_tournament_results()
+    log.info("━━━  RESULTS SYNC COMPLETE  ━━━")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Golf Model Sync Script")
     parser.add_argument(
         "--mode",
-        choices=["full", "live", "pre", "setup"],
+        choices=["full", "live", "pre", "results", "setup"],
         default="full",
-        help="Sync mode: full | live | pre | setup"
+        help="Sync mode: full | live | pre | results | setup"
     )
     args = parser.parse_args()
 
@@ -959,5 +1403,7 @@ if __name__ == "__main__":
         live_sync()
     elif args.mode == "pre":
         pre_sync()
+    elif args.mode == "results":
+        results_sync()
     else:
         full_sync()
