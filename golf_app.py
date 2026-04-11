@@ -271,7 +271,7 @@ def load_data():
     preds      = sb.table("predictions").select("*").execute().data
     live_preds = sb.table("live_predictions").select("*").execute().data
     fin_odds   = sb.table("finish_odds").select("*").execute().data
-    matchups   = sb.table("matchup_odds").select("*").order("p1_dg_win_prob", desc=True).execute().data
+    matchups   = sb.table("matchup_odds").select("*").order("updated_at", desc=True).execute().data
     rounds     = sb.table("rounds").select("*").order("year", desc=True).limit(25000).execute().data
     schedule   = sb.table("schedule").select("*").order("start_date", desc=True).execute().data
     return skill, field, preds, live_preds, fin_odds, matchups, rounds, schedule
@@ -919,6 +919,21 @@ with tab3:
 # ════════════════════════════════════════════════════════════
 with tab4:
     st.markdown('<div class="section-header">🎯 Best H2H Plays Today — Ranked by Edge</div>', unsafe_allow_html=True)
+
+    # ── Staleness check ──────────────────────────────────────
+    if matchups:
+        last_update = matchups[0].get("updated_at", "")
+        if last_update:
+            try:
+                lu = datetime.fromisoformat(last_update.replace("Z", "+00:00"))
+                age_mins = (datetime.now(timezone.utc) - lu).total_seconds() / 60
+                current_round = matchups[0].get("round_num", "?")
+                if age_mins > 20:
+                    st.warning(f"⚠️ H2H odds are {int(age_mins)} min old (Round {current_round}) — run `py golf_sync.py --mode live` to refresh in-round lines")
+                else:
+                    st.success(f"✅ H2H odds current — Round {current_round} · updated {int(age_mins)} min ago")
+            except:
+                pass
 
     st.markdown("""<div class="info-box">
         Matchups ranked by edge % (DG model win probability vs implied book probability).
@@ -1753,6 +1768,21 @@ with tab8:
 # ════════════════════════════════════════════════════════════
 with tab9:
     st.markdown('<div class="section-header">Live Round H2H Matchup Odds — DataGolf Model</div>', unsafe_allow_html=True)
+
+    # ── Staleness check ──────────────────────────────────────
+    if matchups:
+        last_update = matchups[0].get("updated_at", "")
+        if last_update:
+            try:
+                lu = datetime.fromisoformat(last_update.replace("Z", "+00:00"))
+                age_mins = (datetime.now(timezone.utc) - lu).total_seconds() / 60
+                current_round = matchups[0].get("round_num", "?")
+                if age_mins > 20:
+                    st.warning(f"⚠️ H2H odds are {int(age_mins)} min old (Round {current_round}) — run `py golf_sync.py --mode live` to refresh in-round lines")
+                else:
+                    st.success(f"✅ H2H odds current — Round {current_round} · updated {int(age_mins)} min ago")
+            except:
+                pass
 
     if matchups:
         m_rows = []
