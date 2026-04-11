@@ -48,7 +48,7 @@ ODDS_REGION  = "us2"
 ODDS_MARKETS = "outrights"
 ODDS_BOOKS   = [
     "draftkings", "fanduel", "hardrock",
-    "thescore", "betmgm", "caesars", "bet365"
+    "thescore", "betmgm", "caesars"
 ]
 # All golf outright markets available on The Odds API
 GOLF_SPORTS = [
@@ -778,7 +778,7 @@ def sync_finish_odds(tour: str = "pga"):
         for p in players:
             if not isinstance(p, dict): continue
             # Find best odds (highest American = best value for bettors)
-            book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
+            book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "thescore", "hardrock"]
             book_odds = {k: p.get(k) for k in book_cols if p.get(k)}
             best_odds = None
             best_book = None
@@ -799,8 +799,7 @@ def sync_finish_odds(tour: str = "pga"):
                 "fanduel":     p.get("fanduel"),
                 "betmgm":      p.get("betmgm"),
                 "caesars":     p.get("caesars"),
-                "bet365":      p.get("bet365"),
-                "thescore":    p.get("thescore"),
+                                "thescore":    p.get("thescore"),
                 "hardrock":    p.get("hardrock"),
                 "best_odds":   best_odds,
                 "best_book":   best_book,
@@ -874,9 +873,7 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
             "p2_best_odds":    p2_best,
             "p2_best_book":    p2_best_bk,
             # Individual books
-            "p1_bet365":       book_lines.get("bet365", {}).get("p1"),
-            "p2_bet365":       book_lines.get("bet365", {}).get("p2"),
-            "p1_betmgm":       book_lines.get("betmgm", {}).get("p1"),
+                                    "p1_betmgm":       book_lines.get("betmgm", {}).get("p1"),
             "p2_betmgm":       book_lines.get("betmgm", {}).get("p2"),
             "p1_caesars":      book_lines.get("caesars", {}).get("p1"),
             "p2_caesars":      book_lines.get("caesars", {}).get("p2"),
@@ -904,7 +901,7 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
 def sync_historical_odds(tour: str = "pga", year: int = 2026,
                          event_id: str = "all", market: str = "round_matchups"):
     log.info(f"Syncing historical odds ({tour} {year})...")
-    for book in ["draftkings", "fanduel", "betmgm", "caesars", "bet365"]:
+    for book in ["draftkings", "fanduel", "betmgm", "caesars"]:
         data = dg_get("historical-odds/matchups", {
             "tour":     tour,
             "event_id": event_id,
@@ -957,7 +954,7 @@ def sync_odds_api_to_finish_odds():
         on finish_odds (event_id, market, player_name);
     """
     log.info("Syncing finish odds from The Odds API (live lines)...")
-    book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
+    book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "thescore", "hardrock"]
     now = now_utc()
 
     for sport_key, market in GOLF_FINISH_MARKET_MAP.items():
@@ -1252,7 +1249,7 @@ def log_sharp_plays():
     pre_by_id  = {(r["dg_id"], r.get("event_id")): r for r in pre_preds}
 
     THRESHOLDS = {"win": 2.0, "top_5": 3.0, "top_10": 3.5, "top_20": 4.0, "make_cut": 5.0}
-    BOOK_COLS  = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
+    BOOK_COLS  = ["draftkings", "fanduel", "betmgm", "caesars", "thescore", "hardrock"]
 
     rows = []
     seen = set()
