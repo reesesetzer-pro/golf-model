@@ -413,7 +413,8 @@ for p in [x for x in field if not x.get("withdrawn")]:
 
     # Override win prob with live prediction if available
     lp = live_pred_by_id.get(did, {})
-    live_win = (lp.get("win_prob") or 0) * 100 if lp.get("win_prob") else None
+    live_win_raw = lp.get("win_prob")
+    live_win = american_to_implied(live_win_raw) if live_win_raw else None
     w_prob_display = live_win if live_win else w_prob
 
     # Best book odds
