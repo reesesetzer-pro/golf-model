@@ -417,6 +417,7 @@ for p in [x for x in field if not x.get("withdrawn")]:
     live_thru = lp.get("thru") or 0
     live_win = round(live_win_raw * 100, 2) if (live_win_raw and live_thru > 0) else None
     w_prob_display = live_win if live_win else w_prob
+    w_prob_is_live = live_win is not None
 
     # Best book odds
     w_best_odds  = implied_from_best(fo_w)
@@ -441,6 +442,7 @@ for p in [x for x in field if not x.get("withdrawn")]:
         "t20_p":    t20_prob,
         "c_p":      c_prob,
         # win odds
+        "w_prob_is_live": w_prob_is_live,
         "w_dg_p": w_prob_display,    "w_dg":  fo_w.get("dg_odds"),
         "w_dk":   fo_w.get("draftkings"), "w_fd":  fo_w.get("fanduel"),
         "w_mgm":  fo_w.get("betmgm"),     "w_czr": fo_w.get("caesars"),
@@ -550,9 +552,12 @@ with tab1:
             continue
         e_w = edge_pct(p["w_dg_p"], p["w_best"])
         if e_w is None: e_w = 0
+        # Suppress win edge if using stale pre-tournament prob (not live)
+        if not p.get("w_prob_is_live") and live_pred_by_id:
+            e_w = 0
         if e_w < min_edge:
             continue
-        ew,  sharp_w  = sharp_value(p["w_dg_p"], p["w_best"],  "win")
+        ew,  sharp_w  = sharp_value(p["w_dg_p"] if p.get("w_prob_is_live") else None, p["w_best"],  "win")
         e5,  sharp_5  = sharp_value(p["t5_p"],   p["t5_best"], "top_5")
         e10, sharp_10 = sharp_value(p["t10_p"],  p["t10_best"],"top_10")
         ec,  sharp_c  = sharp_value(p["c_p"],    p["c_best"],  "make_cut")
@@ -657,8 +662,13 @@ with tab2:
     for p in field_players:
         prob  = p.get(prob_key)
         best  = p.get(best_key)
-        e     = edge_pct(prob, best)
-        sv_edge, sv = sharp_value(prob, best, mk_threshold)
+        # For win market, suppress edge if prob is stale baseline
+        if mk == "w" and not p.get("w_prob_is_live") and live_pred_by_id:
+            e = 0.0
+            sv_edge, sv = None, None
+        else:
+            e     = edge_pct(prob, best)
+            sv_edge, sv = sharp_value(prob, best, mk_threshold)
         sv_display = f"{sv} +{sv_edge:.2f}%" if sv and sv_edge else (sv or "—")
         row = {
             "Player":      p["name"],
