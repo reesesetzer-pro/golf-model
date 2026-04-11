@@ -266,14 +266,15 @@ def get_supabase():
 @st.cache_data(ttl=300)  # cache 5 min
 def load_data():
     sb = get_supabase()
-    skill    = sb.table("skill_ratings").select("*").order("dg_rank").execute().data
-    field    = sb.table("field").select("*").execute().data
-    preds    = sb.table("predictions").select("*").execute().data
-    fin_odds = sb.table("finish_odds").select("*").execute().data
-    matchups = sb.table("matchup_odds").select("*").order("p1_dg_win_prob", desc=True).execute().data
-    rounds   = sb.table("rounds").select("*").order("year", desc=True).limit(25000).execute().data
-    schedule = sb.table("schedule").select("*").order("start_date", desc=True).execute().data
-    return skill, field, preds, fin_odds, matchups, rounds, schedule
+    skill      = sb.table("skill_ratings").select("*").order("dg_rank").execute().data
+    field      = sb.table("field").select("*").execute().data
+    preds      = sb.table("predictions").select("*").execute().data
+    live_preds = sb.table("live_predictions").select("*").execute().data
+    fin_odds   = sb.table("finish_odds").select("*").execute().data
+    matchups   = sb.table("matchup_odds").select("*").order("p1_dg_win_prob", desc=True).execute().data
+    rounds     = sb.table("rounds").select("*").order("year", desc=True).limit(25000).execute().data
+    schedule   = sb.table("schedule").select("*").order("start_date", desc=True).execute().data
+    return skill, field, preds, live_preds, fin_odds, matchups, rounds, schedule
 
 def edge_tier(e):
     e = float(e or 0)
@@ -342,7 +343,8 @@ st.markdown("""
 # ── Load data ────────────────────────────────────────────────────────────────────
 with st.spinner("Loading live data..."):
     try:
-        skill, field, preds, fin_odds, matchups, rounds, schedule = load_data()
+        skill, field, preds, live_preds, fin_odds, matchups, rounds, schedule = load_data()
+        live_pred_by_id = {int(p["dg_id"]): p for p in live_preds if p.get("dg_id")}
     except Exception as e:
         st.error(f"Could not connect to database: {e}")
         st.stop()
@@ -409,6 +411,11 @@ for p in [x for x in field if not x.get("withdrawn")]:
     c_prob   = pred_pct(pr.get("baseline_make_cut"))
     cw_prob  = pred_pct(pr.get("course_win"))
 
+    # Override win prob with live prediction if available
+    lp = live_pred_by_id.get(did, {})
+    live_win = (lp.get("win_prob") or 0) * 100 if lp.get("win_prob") else None
+    w_prob_display = live_win if live_win else w_prob
+
     # Best book odds
     w_best_odds  = implied_from_best(fo_w)
     t5_best_odds = implied_from_best(fo_5)
@@ -422,17 +429,17 @@ for p in [x for x in field if not x.get("withdrawn")]:
         "sg_total": sk.get("sg_total"), "sg_ott": sk.get("sg_ott"),
         "sg_app":   sk.get("sg_app"),   "sg_atg": sk.get("sg_atg"),
         "sg_putt":  sk.get("sg_putt"),
-        "bl_win":   w_prob,   "bl_top5":  t5_prob,
+        "bl_win":   w_prob_display, "bl_top5":  t5_prob,
         "bl_top10": t10_prob, "bl_cut":   c_prob,
         "co_win":   cw_prob,
         # _p keys used by finish odds tab (prob_key = f"{mk}_p")
-        "w_p":      w_prob,
+        "w_p":      w_prob_display,
         "t5_p":     t5_prob,
         "t10_p":    t10_prob,
         "t20_p":    t20_prob,
         "c_p":      c_prob,
         # win odds
-        "w_dg_p": w_prob,    "w_dg":  fo_w.get("dg_odds"),
+        "w_dg_p": w_prob_display,    "w_dg":  fo_w.get("dg_odds"),
         "w_dk":   fo_w.get("draftkings"), "w_fd":  fo_w.get("fanduel"),
         "w_mgm":  fo_w.get("betmgm"),     "w_czr": fo_w.get("caesars"),
         "w_365":  fo_w.get("bet365"),     "w_score": fo_w.get("thescore"),
