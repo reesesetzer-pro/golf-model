@@ -411,10 +411,11 @@ for p in [x for x in field if not x.get("withdrawn")]:
     c_prob   = pred_pct(pr.get("baseline_make_cut"))
     cw_prob  = pred_pct(pr.get("course_win"))
 
-    # Override win prob with live prediction if available
+    # Override win prob with live prediction if available and player has teed off
     lp = live_pred_by_id.get(did, {})
     live_win_raw = lp.get("win_prob")
-    live_win = round(live_win_raw * 100, 2) if live_win_raw else None
+    live_thru = lp.get("thru") or 0
+    live_win = round(live_win_raw * 100, 2) if (live_win_raw and live_thru > 0) else None
     w_prob_display = live_win if live_win else w_prob
 
     # Best book odds
