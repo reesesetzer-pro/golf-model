@@ -39,9 +39,9 @@ def quick_log_bet(player, market, book, odds, edge, stake=10.0, notes="", event=
             "profit_loss":  0.0,
             "logged_at":    (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat(),
         }).execute()
-        return True, None
+        return True
     except Exception as e:
-        return False, str(e)
+        return False
 
 
 st.set_page_config(
@@ -271,7 +271,7 @@ def load_data():
     preds      = sb.table("predictions").select("*").execute().data
     live_preds = sb.table("live_predictions").select("*").execute().data
     fin_odds   = sb.table("finish_odds").select("*").execute().data
-    matchups   = sb.table("matchup_odds").select("*").order("updated_at", desc=True).execute().data
+    matchups   = sb.table("matchup_odds").select("*").order("p1_dg_win_prob", desc=True).execute().data
     rounds     = sb.table("rounds").select("*").order("year", desc=True).limit(25000).execute().data
     schedule   = sb.table("schedule").select("*").order("start_date", desc=True).execute().data
     return skill, field, preds, live_preds, fin_odds, matchups, rounds, schedule
@@ -330,7 +330,7 @@ def fmt_prob(val):
     return f"{val:.2f}%"
 
 # ── Header ───────────────────────────────────────────────────────────────────────
-st.markdown(f"""
+st.markdown("""
 <div class="golf-header">
   <div>
     <h1>⛳ Golf Betting Model</h1>
@@ -375,7 +375,7 @@ for r in rounds:
 # Build field player list
 def implied_from_best(fo):
     """Return best available American odds from any book column."""
-    for key in ["draftkings", "fanduel", "betmgm", "caesars", "thescore", "hardrock", "best_odds"]:
+    for key in ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock", "best_odds"]:
         val = fo.get(key)
         if val is not None and val != 0:
             try:
@@ -402,14 +402,7 @@ for p in [x for x in field if not x.get("withdrawn")]:
     # Use american_to_implied to convert to probability %
     def pred_pct(val):
         if val is None: return None
-        try:
-            v = float(val)
-            if v == 0: return None
-            if abs(v) <= 1:
-                return round(abs(v) * 100, 2)
-            return american_to_implied(v)
-        except:
-            return None
+        return american_to_implied(val)  # returns % e.g. 18.5 for +450 odds
 
     w_prob   = pred_pct(pr.get("baseline_win"))
     t5_prob  = pred_pct(pr.get("baseline_top5"))
@@ -418,24 +411,11 @@ for p in [x for x in field if not x.get("withdrawn")]:
     c_prob   = pred_pct(pr.get("baseline_make_cut"))
     cw_prob  = pred_pct(pr.get("course_win"))
 
-    # Override with live prediction if available (stored as decimal 0–1, multiply by 100 for %)
+    # Override win prob with live prediction if available
     lp = live_pred_by_id.get(did, {})
-    def live_pct(key):
-        v = lp.get(key)
-        return round(v * 100, 2) if v is not None else None
-
-    live_win  = live_pct("win_prob")
-    live_t5   = live_pct("top5_prob")
-    live_t10  = live_pct("top10_prob")
-    live_t20  = live_pct("top20_prob")
-    live_cut  = live_pct("make_cut_prob")
-
-    # Use live if available, fall back to pre-tourney baseline
-    w_prob_display  = live_win  if live_win  is not None else w_prob
-    t5_prob_live    = live_t5   if live_t5   is not None else t5_prob
-    t10_prob_live   = live_t10  if live_t10  is not None else t10_prob
-    t20_prob_live   = live_t20  if live_t20  is not None else t20_prob
-    c_prob_live     = live_cut  if live_cut  is not None else c_prob
+    live_win_raw = lp.get("win_prob")
+    live_win = round(live_win_raw * 100, 2) if live_win_raw else None
+    w_prob_display = live_win if live_win else w_prob
 
     # Best book odds
     w_best_odds  = implied_from_best(fo_w)
@@ -450,56 +430,35 @@ for p in [x for x in field if not x.get("withdrawn")]:
         "sg_total": sk.get("sg_total"), "sg_ott": sk.get("sg_ott"),
         "sg_app":   sk.get("sg_app"),   "sg_atg": sk.get("sg_atg"),
         "sg_putt":  sk.get("sg_putt"),
-        "bl_win":   w_prob_display, "bl_top5":  t5_prob_live,
-        "bl_top10": t10_prob_live,  "bl_cut":   c_prob_live,
+        "bl_win":   w_prob_display, "bl_top5":  t5_prob,
+        "bl_top10": t10_prob, "bl_cut":   c_prob,
         "co_win":   cw_prob,
-        "is_live":  live_win is not None,  # flag to show live badge
-        # _p keys used by finish odds tab
+        # _p keys used by finish odds tab (prob_key = f"{mk}_p")
         "w_p":      w_prob_display,
-        "t5_p":     t5_prob_live,
-        "t10_p":    t10_prob_live,
-        "t20_p":    t20_prob_live,
-        "c_p":      c_prob_live,
-        # live scoring
-        "live_pos":   lp.get("current_pos"),
-        "live_score": lp.get("current_score"),
-        "live_thru":  lp.get("thru"),
-        "live_today": lp.get("today"),
+        "t5_p":     t5_prob,
+        "t10_p":    t10_prob,
+        "t20_p":    t20_prob,
+        "c_p":      c_prob,
         # win odds
         "w_dg_p": w_prob_display,    "w_dg":  fo_w.get("dg_odds"),
         "w_dk":   fo_w.get("draftkings"), "w_fd":  fo_w.get("fanduel"),
         "w_mgm":  fo_w.get("betmgm"),     "w_czr": fo_w.get("caesars"),
-        "w_score": fo_w.get("thescore"),
+        "w_365":  fo_w.get("bet365"),     "w_score": fo_w.get("thescore"),
         "w_hr":   fo_w.get("hardrock"),   "w_best":w_best_odds,
         "w_bk":   fo_w.get("best_book"),
-        # top 5 odds — per book
+        # top 5 odds
         "t5_dk":  fo_5.get("draftkings"), "t5_fd": fo_5.get("fanduel"),
-        "t5_mgm": fo_5.get("betmgm"),     "t5_czr":fo_5.get("caesars"),
-        "t5_score":fo_5.get("thescore"),
-        "t5_hr":  fo_5.get("hardrock"),   "t5_best":t5_best_odds,
-        "t5_bk":  fo_5.get("best_book"),
-        # top 10 odds — per book
+        "t5_best":t5_best_odds,           "t5_bk": fo_5.get("best_book"),
+        # top 10 odds
         "t10_dk": fo_10.get("draftkings"),"t10_fd":fo_10.get("fanduel"),
-        "t10_mgm":fo_10.get("betmgm"),    "t10_czr":fo_10.get("caesars"),
-        "t10_score":fo_10.get("thescore"),
-        "t10_hr": fo_10.get("hardrock"),  "t10_best":t10_best_odds,
-        "t10_bk": fo_10.get("best_book"),
-        # top 20 odds — per book
-        "t20_dk": fo_20.get("draftkings"),"t20_fd":fo_20.get("fanduel"),
-        "t20_mgm":fo_20.get("betmgm"),    "t20_czr":fo_20.get("caesars"),
-        "t20_score":fo_20.get("thescore"),
-        "t20_hr": fo_20.get("hardrock"),  "t20_best":implied_from_best(fo_20),
-        "t20_bk": fo_20.get("best_book"),
-        # cut odds — per book
-        "c_dk":   fo_c.get("draftkings"), "c_fd":  fo_c.get("fanduel"),
-        "c_mgm":  fo_c.get("betmgm"),     "c_czr": fo_c.get("caesars"),
-        "c_score":fo_c.get("thescore"),
-        "c_hr":   fo_c.get("hardrock"),   "c_best":  implied_from_best(fo_c),
-        "c_bk":   fo_c.get("best_book"),
+        "t10_best":t10_best_odds,         "t10_bk":fo_10.get("best_book"),
+        # top 20 odds
+        "t20_best":implied_from_best(fo_20),"t20_bk":fo_20.get("best_book"),
+        # cut odds
+        "c_best":  implied_from_best(fo_c), "c_bk":  fo_c.get("best_book"),
         "course_rounds": course_rounds.get(did, []),
     })
-live_player_count = sum(1 for p in field_players if p.get("is_live"))
-live_badge = f"🟢 LIVE ({live_player_count} players)" if live_player_count else "🟡 PRE-TOURNEY"
+field_players.sort(key=lambda x: (x["dg_rank"] or 9999))
 
 # ── Metric cards ─────────────────────────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
@@ -538,8 +497,8 @@ with c4:
     h2h_sharp = sum(
         1 for m in matchups
         for side, dg_key, bk_keys in [
-            ("p1", "p1_dg_odds", ["p1_best_odds","p1_draftkings","p1_fanduel","p1_betmgm","p1_caesars","p1_thescore","p1_hardrock"]),
-            ("p2", "p2_dg_odds", ["p2_best_odds","p2_draftkings","p2_fanduel","p2_betmgm","p2_caesars","p2_thescore","p2_hardrock"]),
+            ("p1", "p1_dg_odds", ["p1_best_odds","p1_draftkings","p1_fanduel","p1_betmgm","p1_caesars","p1_bet365","p1_thescore","p1_hardrock"]),
+            ("p2", "p2_dg_odds", ["p2_best_odds","p2_draftkings","p2_fanduel","p2_betmgm","p2_caesars","p2_bet365","p2_thescore","p2_hardrock"]),
         ]
         for bk_odds in [[m.get(k) for k in bk_keys if m.get(k)]]
         if bk_odds and edge_pct(
@@ -550,13 +509,13 @@ with c4:
     st.markdown(f"""<div class="metric-card">
         <div class="label">Last Synced</div>
         <div class="value" style="font-size:1rem">{now_et()}</div>
-        <div class="sub">{live_badge} · {h2h_sharp} H2H sharp plays</div>
+        <div class="sub">{(datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%b %d, %Y")} · {h2h_sharp} H2H sharp plays</div>
     </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "📊 Tournament Forecast",
     "💰 Finish Odds + Edge",
     "⚔️ H2H Matchup Tool",
@@ -568,7 +527,6 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.t
     "🔴 Live Matchups",
     "⚙️ Auto Scheduler",
     "📚 Best Plays by Book",
-    "🧠 Season Analytics",
 ])
 
 # ════════════════════════════════════════════════════════════
@@ -681,19 +639,6 @@ with tab1:
 with tab2:
     st.markdown('<div class="section-header">Finish Position Odds — Best Available Across All Books</div>', unsafe_allow_html=True)
 
-    # Check how stale finish_odds data is
-    if fin_odds:
-        try:
-            latest = max(fo.get("updated_at","") for fo in fin_odds if fo.get("updated_at"))
-            lu = datetime.fromisoformat(latest.replace("Z","+00:00"))
-            age_mins = (datetime.now(timezone.utc) - lu).total_seconds() / 60
-            if age_mins > 20:
-                st.warning(f"⚠️ Finish odds are {int(age_mins)} min old — sourced from DataGolf outrights which lag live book prices. **Always verify the line on the book before betting.**")
-            else:
-                st.info(f"📡 Finish odds from DataGolf · {int(age_mins)} min ago · Lines may lag live book prices by 10–30 min — verify before betting")
-        except:
-            pass
-
     market_sel = st.radio("Market", ["Win", "Top 5", "Top 10", "Top 20", "Make Cut"],
                           horizontal=True, label_visibility="collapsed")
 
@@ -730,6 +675,7 @@ with tab2:
         if mk == "w":
             row["BetMGM"]   = fmt_odds(p.get("w_mgm"))
             row["Caesars"]  = fmt_odds(p.get("w_czr"))
+            row["Bet365"]   = fmt_odds(p.get("w_365"))
             row["theScore"] = fmt_odds(p.get("w_score"))
             row["Hard Rock"]= fmt_odds(p.get("w_hr"))
         rows2.append(row)
@@ -796,7 +742,7 @@ with tab2:
                         odds_val = int(str(best).replace("+",""))
                     except: pass
                     if odds_val:
-                        ok, err = quick_log_bet(
+                        ok = quick_log_bet(
                             player=player, market=market_sel,
                             book=book, odds=odds_val,
                             edge=edge, stake=stake,
@@ -807,7 +753,7 @@ with tab2:
                             st.success("✅ Logged!")
                             st.cache_data.clear()
                         else:
-                            st.error(f"Failed: {err}")
+                            st.error("Failed")
                     else:
                         st.warning("No odds to log")
 
@@ -933,21 +879,6 @@ with tab3:
 with tab4:
     st.markdown('<div class="section-header">🎯 Best H2H Plays Today — Ranked by Edge</div>', unsafe_allow_html=True)
 
-    # ── Staleness check ──────────────────────────────────────
-    if matchups:
-        last_update = matchups[0].get("updated_at", "")
-        if last_update:
-            try:
-                lu = datetime.fromisoformat(last_update.replace("Z", "+00:00"))
-                age_mins = (datetime.now(timezone.utc) - lu).total_seconds() / 60
-                current_round = matchups[0].get("round_num", "?")
-                if age_mins > 20:
-                    st.warning(f"⚠️ H2H odds are {int(age_mins)} min old (Round {current_round}) — run `py golf_sync.py --mode live` to refresh in-round lines")
-                else:
-                    st.success(f"✅ H2H odds current — Round {current_round} · updated {int(age_mins)} min ago")
-            except:
-                pass
-
     st.markdown("""<div class="info-box">
         Matchups ranked by edge % (DG model win probability vs implied book probability).
         Only plays above the sharp threshold are shown. Refresh after running
@@ -959,8 +890,7 @@ with tab4:
         min_edge_h2h = st.slider("Min Edge %", 0.0, 10.0, 2.0, 0.5,
                                   key="h2h_edge", label_visibility="collapsed")
     with col_f2:
-        round_filter = st.selectbox("Round", ["All Rounds", "Round 1", "Round 2",
-                                               "Round 3", "Round 4"],
+        round_filter = st.selectbox("Round", ["Round 3", "Round 4", "Round 2", "Round 1", "All Rounds"],
                                      label_visibility="collapsed")
     with col_f3:
         side_filter = st.selectbox("Side", ["Both Sides", "Favorites Only", "Underdogs Only"],
@@ -977,7 +907,7 @@ with tab4:
             approved = {
                 "DraftKings": m.get("p1_draftkings"), "FanDuel": m.get("p1_fanduel"),
                 "BetMGM": m.get("p1_betmgm"), "Caesars": m.get("p1_caesars"),
-                "theScore": m.get("p1_thescore"),
+                "Bet365": m.get("p1_bet365"), "theScore": m.get("p1_thescore"),
                 "Hard Rock": m.get("p1_hardrock"),
             }
             p1_approved = {k: v for k, v in approved.items() if v}
@@ -987,7 +917,7 @@ with tab4:
             approved2 = {
                 "DraftKings": m.get("p2_draftkings"), "FanDuel": m.get("p2_fanduel"),
                 "BetMGM": m.get("p2_betmgm"), "Caesars": m.get("p2_caesars"),
-                "theScore": m.get("p2_thescore"),
+                "Bet365": m.get("p2_bet365"), "theScore": m.get("p2_thescore"),
                 "Hard Rock": m.get("p2_hardrock"),
             }
             p2_approved = {k: v for k, v in approved2.items() if v}
@@ -1105,7 +1035,7 @@ with tab4:
                                     break
                                 except: pass
                         if odds_val:
-                            ok, err = quick_log_bet(
+                            ok = quick_log_bet(
                                 player=player, market="H2H",
                                 book=book or "Best Available",
                                 odds=odds_val, edge=edge,
@@ -1157,12 +1087,9 @@ with tab5:
             pos   = p.get("current_pos")
             score = p.get("current_score")
             thru  = p.get("thru")
-            today = p.get("today")
-            rnd   = p.get("round_num")
             win   = (p.get("win_prob") or 0) * 100
             t5    = (p.get("top5_prob") or 0) * 100
             t10   = (p.get("top10_prob") or 0) * 100
-            t20   = (p.get("top20_prob") or 0) * 100
             cut   = (p.get("make_cut_prob") or 0) * 100
 
             # Find player's pre-tournament win prob for comparison
@@ -1172,8 +1099,6 @@ with tab5:
             lb_rows.append({
                 "Pos":        pos or "—",
                 "Player":     p.get("player_name",""),
-                "Rnd":        rnd or "—",
-                "Today":      today,
                 "Score":      score,
                 "Thru":       thru if thru and thru < 18 else "F",
                 "Win%":       round(win, 2),
@@ -1181,7 +1106,6 @@ with tab5:
                 "Win Δ":      round(win - pre_win, 2),
                 "Top 5%":     round(t5, 2),
                 "Top 10%":    round(t10, 2),
-                "Top 20%":    round(t20, 2),
                 "Make Cut%":  round(cut, 2),
             })
 
@@ -1199,17 +1123,15 @@ with tab5:
             return ""
 
         styled_lb = df_lb.style\
-            .map(color_score, subset=["Today", "Score"])\
+            .map(color_score, subset=["Score"])\
             .map(color_delta, subset=["Win Δ"])\
             .format({
-                "Today":     "{:+d}",
                 "Score":     "{:+d}",
                 "Win%":      "{:.2f}%",
                 "Pre Win%":  "{:.2f}%",
                 "Win Δ":     "{:+.2f}%",
                 "Top 5%":    "{:.2f}%",
                 "Top 10%":   "{:.2f}%",
-                "Top 20%":   "{:.2f}%",
                 "Make Cut%": "{:.2f}%",
             }, na_rep="—")
 
@@ -1246,33 +1168,20 @@ with tab5:
 
 # ════════════════════════════════════════════════════════════
 # TAB 6 — RESULTS TRACKER (LEARNING SYSTEM)
-# Pre-compute outside the tab so both r_tab3 and r_tab4 share the same data
 # ════════════════════════════════════════════════════════════
-@st.cache_data(ttl=30)
-def load_bets():
-    try:
-        sb = get_supabase()
-        return sb.table("bets").select("*").order("logged_at", desc=True).execute().data
-    except:
-        return []
-
-_bets_global    = load_bets()
-_settled_global = [b for b in _bets_global if b.get("result") not in ("Pending", None, "Void")]
-tier_stats = {}
-for _b in _settled_global:
-    _tier = edge_tier(_b.get("edge_at_bet", 0))
-    if _tier not in tier_stats:
-        tier_stats[_tier] = {"bets": 0, "wins": 0, "staked": 0, "pl": 0}
-    tier_stats[_tier]["bets"]   += 1
-    tier_stats[_tier]["wins"]   += 1 if _b.get("result") == "Win" else 0
-    tier_stats[_tier]["staked"] += float(_b.get("stake", 0) or 0)
-    tier_stats[_tier]["pl"]     += float(_b.get("profit_loss", 0) or 0)
-
 with tab6:
     st.markdown('<div class="section-header">📝 Results Tracker — Bet Log, P&L & Learning Analytics</div>', unsafe_allow_html=True)
 
-    bets     = _bets_global
-    settled  = _settled_global
+    @st.cache_data(ttl=30)
+    def load_bets():
+        try:
+            sb = get_supabase()
+            return sb.table("bets").select("*").order("logged_at", desc=True).execute().data
+        except:
+            return []
+
+    bets = load_bets()
+    settled  = [b for b in bets if b.get("result") not in ("Pending", None, "Void")]
     pending  = [b for b in bets if b.get("result") in ("Pending", None)]
     wins     = [b for b in settled if b.get("result") == "Win"]
     total_staked = sum(b.get("stake",0) or 0 for b in bets)
@@ -1305,7 +1214,7 @@ with tab6:
             bet_side    = st.text_input("Side / Description", placeholder="e.g. Scheffler to Win", key="bt_side")
             bet_tournament = st.text_input("Tournament", value=current_event, key="bt_tourn")
         with col_b:
-            bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Hard Rock","theScore"], key="bt_book")
+            bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","Hard Rock","theScore"], key="bt_book")
             bet_odds    = st.number_input("Odds (American)", value=-110, step=5, key="bt_odds")
             bet_stake   = st.number_input("Stake ($)", value=10.0, step=5.0, key="bt_stake")
             bet_closing = st.number_input("Closing Line Odds (optional)", value=0, step=5, key="bt_closing",
@@ -1372,7 +1281,7 @@ with tab6:
                     ["All","Win","Top 5","Top 10","Top 20","Make Cut","H2H"], key="filt_mkt")
             with fc3:
                 filter_book = st.selectbox("Filter by Book",
-                    ["All","DraftKings","FanDuel","BetMGM","Caesars","Hard Rock","theScore"], key="filt_bk")
+                    ["All","DraftKings","FanDuel","BetMGM","Caesars","Bet365","Hard Rock","theScore"], key="filt_bk")
 
             filt_bets = bets
             if filter_result != "All": filt_bets = [b for b in filt_bets if b.get("result") == filter_result]
@@ -1452,7 +1361,25 @@ with tab6:
         else:
             st.markdown('<div class="section-header">📊 Edge Tier Performance — Are the sharp plays actually hitting?</div>', unsafe_allow_html=True)
 
-            # tier_stats is pre-computed at module level (shared with r_tab4)
+            # Edge tier breakdown
+            def edge_tier(e):
+                e = float(e or 0)
+                if e >= 5:   return "🔥🔥 STRONG (5%+)"
+                if e >= 3:   return "🔥 SHARP (3-5%)"
+                if e >= 2:   return "✅ VALUE (2-3%)"
+                if e >= 0:   return "Below Threshold"
+                return "Manual / No Edge"
+
+            tier_stats = {}
+            for b in settled:
+                tier = edge_tier(b.get("edge_at_bet", 0))
+                if tier not in tier_stats:
+                    tier_stats[tier] = {"bets":0,"wins":0,"staked":0,"pl":0}
+                tier_stats[tier]["bets"]   += 1
+                tier_stats[tier]["wins"]   += 1 if b.get("result") == "Win" else 0
+                tier_stats[tier]["staked"] += float(b.get("stake",0) or 0)
+                tier_stats[tier]["pl"]     += float(b.get("profit_loss",0) or 0)
+
             tier_rows = []
             for tier, s in sorted(tier_stats.items(), key=lambda x: -x[1]["staked"]):
                 wr = round(s["wins"]/s["bets"]*100,1) if s["bets"] else 0
@@ -1642,7 +1569,7 @@ with tab6:
                             odds_val = int(str(best).replace("+",""))
                         except: pass
                         if odds_val:
-                            ok, err = quick_log_bet(
+                            ok = quick_log_bet(
                                 player=player, market=market,
                                 book=book, odds=odds_val,
                                 edge=edge, stake=stake,
@@ -1781,21 +1708,6 @@ with tab8:
 # ════════════════════════════════════════════════════════════
 with tab9:
     st.markdown('<div class="section-header">Live Round H2H Matchup Odds — DataGolf Model</div>', unsafe_allow_html=True)
-
-    # ── Staleness check ──────────────────────────────────────
-    if matchups:
-        last_update = matchups[0].get("updated_at", "")
-        if last_update:
-            try:
-                lu = datetime.fromisoformat(last_update.replace("Z", "+00:00"))
-                age_mins = (datetime.now(timezone.utc) - lu).total_seconds() / 60
-                current_round = matchups[0].get("round_num", "?")
-                if age_mins > 20:
-                    st.warning(f"⚠️ H2H odds are {int(age_mins)} min old (Round {current_round}) — run `py golf_sync.py --mode live` to refresh in-round lines")
-                else:
-                    st.success(f"✅ H2H odds current — Round {current_round} · updated {int(age_mins)} min ago")
-            except:
-                pass
 
     if matchups:
         m_rows = []
@@ -1946,7 +1858,8 @@ with tab11:
         ("FanDuel",     "fd"),
         ("BetMGM",      "mgm"),
         ("Caesars",     "czr"),
-            ("theScore",    "score"),
+        ("Bet365",      "365"),
+        ("theScore",    "score"),
         ("Hard Rock",   "hr"),
     ]
 
@@ -1958,20 +1871,15 @@ with tab11:
         ("Make Cut", "c",   "make_cut"),
     ]
 
-    # Book key → per-market field suffix map
-    # field_players now stores per-book odds for ALL markets
-    BOOK_FIELD_MAP = {
-        "DraftKings": {"w": "w_dk",  "t5": "t5_dk",  "t10": "t10_dk",  "t20": "t20_dk",  "c": "c_dk"},
-        "FanDuel":    {"w": "w_fd",  "t5": "t5_fd",  "t10": "t10_fd",  "t20": "t20_fd",  "c": "c_fd"},
-        "BetMGM":     {"w": "w_mgm", "t5": "t5_mgm", "t10": "t10_mgm", "t20": "t20_mgm", "c": "c_mgm"},
-        "Caesars":    {"w": "w_czr", "t5": "t5_czr", "t10": "t10_czr", "t20": "t20_czr", "c": "c_czr"},
-                "theScore":   {"w": "w_score","t5":"t5_score","t10":"t10_score","t20":"t20_score","c": "c_score"},
-        "Hard Rock":  {"w": "w_hr",  "t5": "t5_hr",  "t10": "t10_hr",  "t20": "t20_hr",  "c": "c_hr"},
+    # Map book label → finish_odds field key
+    BOOK_FO_KEY = {
+        "DraftKings": "w_dk",  "FanDuel": "w_fd",   "BetMGM": "w_mgm",
+        "Caesars":    "w_czr", "Bet365":  "w_365",  "theScore": "w_score",
+        "Hard Rock":  "w_hr",
     }
-
     BOOK_MK_PREFIX = {
         "DraftKings": "draftkings", "FanDuel": "fanduel",   "BetMGM": "betmgm",
-        "Caesars":    "caesars",    "theScore": "thescore",
+        "Caesars":    "caesars",    "Bet365":  "bet365",    "theScore": "thescore",
         "Hard Rock":  "hardrock",
     }
 
@@ -1983,20 +1891,30 @@ with tab11:
     MIN_EDGE = 3.0
     book_plays = {book: [] for book, _ in APPROVED_BOOKS}
 
-    # ── Finish position plays — all markets, all books ──
+    # ── Finish position plays ──
     for market_label, mk, mk_threshold in FINISH_MARKETS:
         prob_key = f"{mk}_p"
         for p in field_players:
             prob = p.get(prob_key)
-            if not prob:
-                continue
+            if not prob: continue
             for book_name, _ in APPROVED_BOOKS:
-                field_key = BOOK_FIELD_MAP.get(book_name, {}).get(mk)
-                if not field_key:
+                # Get this book's odds for this market
+                if mk == "w":
+                    book_field = f"w_{BOOK_MK_PREFIX[book_name]}" if mk == "w" else None
+                    # use stored keys
+                    bk_map = {
+                        "DraftKings": p.get("w_dk"),  "FanDuel": p.get("w_fd"),
+                        "BetMGM":     p.get("w_mgm"), "Caesars": p.get("w_czr"),
+                        "Bet365":     p.get("w_365"), "theScore": p.get("w_score"),
+                        "Hard Rock":  p.get("w_hr"),
+                    }
+                    odds = bk_map.get(book_name)
+                else:
+                    # For other markets pull from fo_index via field_players best key
+                    # We only store best odds, not per-book for t5/t10/t20/cut
+                    # Skip non-win per-book breakdown (not stored per book)
                     continue
-                odds = p.get(field_key)
-                if not odds:
-                    continue
+                if not odds: continue
                 e, sv = sharp_value(prob, odds, mk_threshold)
                 if e is None or e < MIN_EDGE: continue
                 sv_display = f"{sv} +{e:.2f}%" if sv else f"+{e:.2f}%"
@@ -2012,10 +1930,15 @@ with tab11:
 
     # ── H2H plays ──
     if matchups:
+        # Find the highest round number available
+        max_rnd = max((m.get("round_num") or 0) for m in matchups)
         for m in matchups:
             p1w = (m.get("p1_dg_win_prob") or 0) * 100
             p2w = (m.get("p2_dg_win_prob") or 0) * 100
             rnd = m.get("round_num", 0)
+            # Only show current round in Best H2H Plays
+            if rnd != max_rnd:
+                continue
             rnd_label = f"R{rnd}" if rnd else ""
             for side, name_key, dg_prob, prefix in [
                 ("p1", "p1_name", p1w, "p1"),
@@ -2084,182 +2007,6 @@ with tab11:
             {total_plays} total plays above 3% edge · Refresh after running
             <code>py golf_sync.py --mode live</code>
         </div>""", unsafe_allow_html=True)
-
-
-# ════════════════════════════════════════════════════════════
-# TAB 12 — SEASON ANALYTICS (learning system)
-# ════════════════════════════════════════════════════════════
-with tab12:
-    st.markdown('<div class="section-header">🧠 Season Analytics — Model Calibration & Edge Accuracy</div>', unsafe_allow_html=True)
-
-    st.markdown("""<div class="info-box">
-        Tracks every sharp play the model surfaces, compares predicted probability to
-        actual outcomes, and calibrates edge tiers over the full season.
-        Data grows each week as you run syncs and settle bets.
-        Run <code>py golf_sync.py --mode results</code> after each tournament Sunday to auto-archive results.
-    </div>""", unsafe_allow_html=True)
-
-    @st.cache_data(ttl=300)
-    def load_season_data():
-        sb = get_supabase()
-        try:
-            edge_log  = sb.table("edge_log").select("*").order("logged_at", desc=True).limit(5000).execute().data
-        except: edge_log = []
-        try:
-            t_results = sb.table("tournament_results").select("*").order("season", desc=True).execute().data
-        except: t_results = []
-        try:
-            snapshots = sb.table("prediction_snapshots").select("*").eq("snapshot_type","pre").execute().data
-        except: snapshots = []
-        return edge_log, t_results, snapshots
-
-    edge_log, t_results, snapshots = load_season_data()
-
-    s_tab1, s_tab2, s_tab3 = st.tabs(["📐 Edge Calibration", "🏆 Tournament Results", "📸 Prediction Archive"])
-
-    # ── EDGE CALIBRATION ──────────────────────────────────────
-    with s_tab1:
-        if not edge_log:
-            st.info("Edge log is empty. Run `py golf_sync.py --mode live` during a tournament round — sharp plays are automatically logged each sync.")
-        else:
-            settled_edges = [e for e in edge_log if e.get("outcome") in ("WIN","LOSS","PUSH")]
-            pending_edges = [e for e in edge_log if not e.get("outcome")]
-
-            st.markdown(f"""<div class="info-box">
-                {len(edge_log)} total plays logged · {len(settled_edges)} settled · {len(pending_edges)} pending outcome
-            </div>""", unsafe_allow_html=True)
-
-            if settled_edges:
-                st.markdown('<div class="section-header">Edge Tier Calibration — Predicted vs Actual Hit Rate</div>', unsafe_allow_html=True)
-
-                cal_stats = {}
-                for e in settled_edges:
-                    tier = e.get("edge_tier", "Unknown")
-                    mkt  = e.get("market", "")
-                    key  = f"{tier} · {mkt}"
-                    if key not in cal_stats:
-                        cal_stats[key] = {"plays":0, "wins":0, "avg_model_prob":0, "avg_edge":0}
-                    cal_stats[key]["plays"] += 1
-                    cal_stats[key]["wins"]  += 1 if e.get("outcome") == "WIN" else 0
-                    cal_stats[key]["avg_model_prob"] += float(e.get("model_prob") or 0)
-                    cal_stats[key]["avg_edge"] += float(e.get("edge_pct") or 0)
-
-                cal_rows = []
-                for key, s in sorted(cal_stats.items(), key=lambda x: -x[1]["plays"]):
-                    hit_rate   = round(s["wins"] / s["plays"] * 100, 1)
-                    avg_prob   = round(s["avg_model_prob"] / s["plays"] * 100, 1)
-                    avg_edge   = round(s["avg_edge"] / s["plays"], 2)
-                    calibration = round(hit_rate - avg_prob, 1)  # positive = model underestimates
-                    cal_rows.append({
-                        "Tier · Market":   key,
-                        "Plays":           s["plays"],
-                        "Hit Rate":        hit_rate,
-                        "Avg Model Prob%": avg_prob,
-                        "Avg Edge%":       avg_edge,
-                        "Calibration Δ":   calibration,
-                        "Verdict": "✅ Well Calibrated" if abs(calibration) < 5 else
-                                   ("📈 Model Underestimates" if calibration > 0 else "📉 Model Overestimates"),
-                    })
-
-                def color_cal(val):
-                    if isinstance(val, (int, float)):
-                        if abs(val) < 3: return "color:#69f0ae"
-                        if val > 5:  return "color:#ffcc02"
-                        if val < -5: return "color:#ef9a9a"
-                    return ""
-
-                st.dataframe(
-                    pd.DataFrame(cal_rows).style
-                        .map(color_cal, subset=["Calibration Δ"])
-                        .format({"Hit Rate":"{:.1f}%","Avg Model Prob%":"{:.1f}%",
-                                 "Avg Edge%":"{:+.2f}%","Calibration Δ":"{:+.1f}%"}, na_rep="—"),
-                    use_container_width=True, hide_index=True
-                )
-                st.markdown("""<div class="info-box">
-                    <b>Calibration Δ</b> = Actual Hit Rate − Model Probability.<br>
-                    Near 0 = model is well calibrated. Positive = model is conservative (underestimates). Negative = model is optimistic.
-                </div>""", unsafe_allow_html=True)
-
-            # Recent edge log
-            st.markdown('<div class="section-header">Recent Edge Log</div>', unsafe_allow_html=True)
-            log_rows = [{
-                "Logged":    (e.get("logged_at") or "")[:10],
-                "Player":    e.get("player_name",""),
-                "Market":    e.get("market",""),
-                "Tier":      e.get("edge_tier",""),
-                "Model%":    round((e.get("model_prob") or 0)*100, 2),
-                "Book%":     round((e.get("book_implied") or 0)*100, 2),
-                "Edge%":     round(e.get("edge_pct") or 0, 2),
-                "Book":      e.get("best_book",""),
-                "Odds":      fmt_odds(e.get("best_odds")),
-                "Live":      "🟢" if e.get("is_live") else "🟡",
-                "Outcome":   e.get("outcome") or "Pending",
-            } for e in edge_log[:200]]
-
-            def color_outcome(val):
-                if val == "WIN":  return "color:#69f0ae; font-weight:700"
-                if val == "LOSS": return "color:#ef9a9a"
-                return "color:#90a4ae"
-
-            st.dataframe(
-                pd.DataFrame(log_rows).style
-                    .map(color_outcome, subset=["Outcome"])
-                    .format({"Model%":"{:.2f}%","Book%":"{:.2f}%","Edge%":"{:+.2f}%"}, na_rep="—"),
-                use_container_width=True, hide_index=True, height=400
-            )
-
-    # ── TOURNAMENT RESULTS ────────────────────────────────────
-    with s_tab2:
-        if not t_results:
-            st.info("No tournament results yet. Run `py golf_sync.py --mode results` after a tournament finishes to auto-archive results and settle bets.")
-        else:
-            events = sorted(set(r.get("event_name","") for r in t_results if r.get("event_name")), reverse=True)
-            sel_event = st.selectbox("Tournament", events, label_visibility="collapsed")
-            ev_rows = [r for r in t_results if r.get("event_name") == sel_event]
-
-            if ev_rows:
-                df_res = pd.DataFrame([{
-                    "Pos":           r.get("finish_pos_text") or r.get("finish_pos","—"),
-                    "Player":        r.get("player_name",""),
-                    "Score":         r.get("total_score"),
-                    "R1":            r.get("score_r1"),
-                    "R2":            r.get("score_r2"),
-                    "R3":            r.get("score_r3"),
-                    "R4":            r.get("score_r4"),
-                    "Made Cut":      "✅" if r.get("made_cut") else "❌",
-                    "Top 10":        "✅" if r.get("top_10") else "",
-                    "Pre Win%":      round((r.get("pre_win_prob") or 0)*100, 2),
-                    "Pre Top10%":    round((r.get("pre_top10_prob") or 0)*100, 2),
-                } for r in sorted(ev_rows, key=lambda x: x.get("finish_pos") or 999)])
-
-                st.dataframe(df_res.style.format({
-                    "Pre Win%":"{:.2f}%","Pre Top10%":"{:.2f}%"
-                }, na_rep="—"), use_container_width=True, hide_index=True, height=500)
-
-    # ── PREDICTION ARCHIVE ────────────────────────────────────
-    with s_tab3:
-        if not snapshots:
-            st.info("No prediction snapshots yet. Run `py golf_sync.py --mode pre` at the start of tournament week to archive pre-tourney model predictions.")
-        else:
-            snap_events = sorted(set(s.get("event_name","") for s in snapshots if s.get("event_name")), reverse=True)
-            sel_snap = st.selectbox("Tournament", snap_events, label_visibility="collapsed", key="snap_ev")
-            snap_rows = [s for s in snapshots if s.get("event_name") == sel_snap]
-
-            if snap_rows:
-                df_snap = pd.DataFrame([{
-                    "Player":    s.get("player_name",""),
-                    "Win%":      round((s.get("win_prob") or 0)*100, 2),
-                    "Top 5%":    round((s.get("top5_prob") or 0)*100, 2),
-                    "Top 10%":   round((s.get("top10_prob") or 0)*100, 2),
-                    "Top 20%":   round((s.get("top20_prob") or 0)*100, 2),
-                    "Make Cut%": round((s.get("make_cut_prob") or 0)*100, 2),
-                    "Snapped":   (s.get("snapped_at") or "")[:10],
-                } for s in sorted(snap_rows, key=lambda x: -(x.get("win_prob") or 0))])
-
-                st.dataframe(df_snap.style.format({
-                    "Win%":"{:.2f}%","Top 5%":"{:.2f}%","Top 10%":"{:.2f}%",
-                    "Top 20%":"{:.2f}%","Make Cut%":"{:.2f}%",
-                }, na_rep="—"), use_container_width=True, hide_index=True, height=500)
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────────
