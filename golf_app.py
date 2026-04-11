@@ -39,9 +39,9 @@ def quick_log_bet(player, market, book, odds, edge, stake=10.0, notes="", event=
             "profit_loss":  0.0,
             "logged_at":    (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat(),
         }).execute()
-        return True
+        return True, None
     except Exception as e:
-        return False
+        return False, str(e)
 
 
 st.set_page_config(
@@ -375,7 +375,7 @@ for r in rounds:
 # Build field player list
 def implied_from_best(fo):
     """Return best available American odds from any book column."""
-    for key in ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock", "best_odds"]:
+    for key in ["draftkings", "fanduel", "betmgm", "caesars", "thescore", "hardrock", "best_odds"]:
         val = fo.get(key)
         if val is not None and val != 0:
             try:
@@ -469,31 +469,31 @@ for p in [x for x in field if not x.get("withdrawn")]:
         "w_dg_p": w_prob_display,    "w_dg":  fo_w.get("dg_odds"),
         "w_dk":   fo_w.get("draftkings"), "w_fd":  fo_w.get("fanduel"),
         "w_mgm":  fo_w.get("betmgm"),     "w_czr": fo_w.get("caesars"),
-        "w_365":  fo_w.get("bet365"),     "w_score": fo_w.get("thescore"),
+        "w_score": fo_w.get("thescore"),
         "w_hr":   fo_w.get("hardrock"),   "w_best":w_best_odds,
         "w_bk":   fo_w.get("best_book"),
         # top 5 odds — per book
         "t5_dk":  fo_5.get("draftkings"), "t5_fd": fo_5.get("fanduel"),
         "t5_mgm": fo_5.get("betmgm"),     "t5_czr":fo_5.get("caesars"),
-        "t5_365": fo_5.get("bet365"),     "t5_score":fo_5.get("thescore"),
+        "t5_score":fo_5.get("thescore"),
         "t5_hr":  fo_5.get("hardrock"),   "t5_best":t5_best_odds,
         "t5_bk":  fo_5.get("best_book"),
         # top 10 odds — per book
         "t10_dk": fo_10.get("draftkings"),"t10_fd":fo_10.get("fanduel"),
         "t10_mgm":fo_10.get("betmgm"),    "t10_czr":fo_10.get("caesars"),
-        "t10_365":fo_10.get("bet365"),    "t10_score":fo_10.get("thescore"),
+        "t10_score":fo_10.get("thescore"),
         "t10_hr": fo_10.get("hardrock"),  "t10_best":t10_best_odds,
         "t10_bk": fo_10.get("best_book"),
         # top 20 odds — per book
         "t20_dk": fo_20.get("draftkings"),"t20_fd":fo_20.get("fanduel"),
         "t20_mgm":fo_20.get("betmgm"),    "t20_czr":fo_20.get("caesars"),
-        "t20_365":fo_20.get("bet365"),    "t20_score":fo_20.get("thescore"),
+        "t20_score":fo_20.get("thescore"),
         "t20_hr": fo_20.get("hardrock"),  "t20_best":implied_from_best(fo_20),
         "t20_bk": fo_20.get("best_book"),
         # cut odds — per book
         "c_dk":   fo_c.get("draftkings"), "c_fd":  fo_c.get("fanduel"),
         "c_mgm":  fo_c.get("betmgm"),     "c_czr": fo_c.get("caesars"),
-        "c_365":  fo_c.get("bet365"),     "c_score":fo_c.get("thescore"),
+        "c_score":fo_c.get("thescore"),
         "c_hr":   fo_c.get("hardrock"),   "c_best":  implied_from_best(fo_c),
         "c_bk":   fo_c.get("best_book"),
         "course_rounds": course_rounds.get(did, []),
@@ -538,8 +538,8 @@ with c4:
     h2h_sharp = sum(
         1 for m in matchups
         for side, dg_key, bk_keys in [
-            ("p1", "p1_dg_odds", ["p1_best_odds","p1_draftkings","p1_fanduel","p1_betmgm","p1_caesars","p1_bet365","p1_thescore","p1_hardrock"]),
-            ("p2", "p2_dg_odds", ["p2_best_odds","p2_draftkings","p2_fanduel","p2_betmgm","p2_caesars","p2_bet365","p2_thescore","p2_hardrock"]),
+            ("p1", "p1_dg_odds", ["p1_best_odds","p1_draftkings","p1_fanduel","p1_betmgm","p1_caesars","p1_thescore","p1_hardrock"]),
+            ("p2", "p2_dg_odds", ["p2_best_odds","p2_draftkings","p2_fanduel","p2_betmgm","p2_caesars","p2_thescore","p2_hardrock"]),
         ]
         for bk_odds in [[m.get(k) for k in bk_keys if m.get(k)]]
         if bk_odds and edge_pct(
@@ -717,7 +717,6 @@ with tab2:
         if mk == "w":
             row["BetMGM"]   = fmt_odds(p.get("w_mgm"))
             row["Caesars"]  = fmt_odds(p.get("w_czr"))
-            row["Bet365"]   = fmt_odds(p.get("w_365"))
             row["theScore"] = fmt_odds(p.get("w_score"))
             row["Hard Rock"]= fmt_odds(p.get("w_hr"))
         rows2.append(row)
@@ -784,7 +783,7 @@ with tab2:
                         odds_val = int(str(best).replace("+",""))
                     except: pass
                     if odds_val:
-                        ok = quick_log_bet(
+                        ok, err = quick_log_bet(
                             player=player, market=market_sel,
                             book=book, odds=odds_val,
                             edge=edge, stake=stake,
@@ -795,7 +794,7 @@ with tab2:
                             st.success("✅ Logged!")
                             st.cache_data.clear()
                         else:
-                            st.error("Failed")
+                            st.error(f"Failed: {err}")
                     else:
                         st.warning("No odds to log")
 
@@ -950,7 +949,7 @@ with tab4:
             approved = {
                 "DraftKings": m.get("p1_draftkings"), "FanDuel": m.get("p1_fanduel"),
                 "BetMGM": m.get("p1_betmgm"), "Caesars": m.get("p1_caesars"),
-                "Bet365": m.get("p1_bet365"), "theScore": m.get("p1_thescore"),
+                "theScore": m.get("p1_thescore"),
                 "Hard Rock": m.get("p1_hardrock"),
             }
             p1_approved = {k: v for k, v in approved.items() if v}
@@ -960,7 +959,7 @@ with tab4:
             approved2 = {
                 "DraftKings": m.get("p2_draftkings"), "FanDuel": m.get("p2_fanduel"),
                 "BetMGM": m.get("p2_betmgm"), "Caesars": m.get("p2_caesars"),
-                "Bet365": m.get("p2_bet365"), "theScore": m.get("p2_thescore"),
+                "theScore": m.get("p2_thescore"),
                 "Hard Rock": m.get("p2_hardrock"),
             }
             p2_approved = {k: v for k, v in approved2.items() if v}
@@ -1078,7 +1077,7 @@ with tab4:
                                     break
                                 except: pass
                         if odds_val:
-                            ok = quick_log_bet(
+                            ok, err = quick_log_bet(
                                 player=player, market="H2H",
                                 book=book or "Best Available",
                                 odds=odds_val, edge=edge,
@@ -1278,7 +1277,7 @@ with tab6:
             bet_side    = st.text_input("Side / Description", placeholder="e.g. Scheffler to Win", key="bt_side")
             bet_tournament = st.text_input("Tournament", value=current_event, key="bt_tourn")
         with col_b:
-            bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","Hard Rock","theScore"], key="bt_book")
+            bet_book    = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Hard Rock","theScore"], key="bt_book")
             bet_odds    = st.number_input("Odds (American)", value=-110, step=5, key="bt_odds")
             bet_stake   = st.number_input("Stake ($)", value=10.0, step=5.0, key="bt_stake")
             bet_closing = st.number_input("Closing Line Odds (optional)", value=0, step=5, key="bt_closing",
@@ -1345,7 +1344,7 @@ with tab6:
                     ["All","Win","Top 5","Top 10","Top 20","Make Cut","H2H"], key="filt_mkt")
             with fc3:
                 filter_book = st.selectbox("Filter by Book",
-                    ["All","DraftKings","FanDuel","BetMGM","Caesars","Bet365","Hard Rock","theScore"], key="filt_bk")
+                    ["All","DraftKings","FanDuel","BetMGM","Caesars","Hard Rock","theScore"], key="filt_bk")
 
             filt_bets = bets
             if filter_result != "All": filt_bets = [b for b in filt_bets if b.get("result") == filter_result]
@@ -1615,7 +1614,7 @@ with tab6:
                             odds_val = int(str(best).replace("+",""))
                         except: pass
                         if odds_val:
-                            ok = quick_log_bet(
+                            ok, err = quick_log_bet(
                                 player=player, market=market,
                                 book=book, odds=odds_val,
                                 edge=edge, stake=stake,
@@ -1904,8 +1903,7 @@ with tab11:
         ("FanDuel",     "fd"),
         ("BetMGM",      "mgm"),
         ("Caesars",     "czr"),
-        ("Bet365",      "365"),
-        ("theScore",    "score"),
+            ("theScore",    "score"),
         ("Hard Rock",   "hr"),
     ]
 
@@ -1924,14 +1922,13 @@ with tab11:
         "FanDuel":    {"w": "w_fd",  "t5": "t5_fd",  "t10": "t10_fd",  "t20": "t20_fd",  "c": "c_fd"},
         "BetMGM":     {"w": "w_mgm", "t5": "t5_mgm", "t10": "t10_mgm", "t20": "t20_mgm", "c": "c_mgm"},
         "Caesars":    {"w": "w_czr", "t5": "t5_czr", "t10": "t10_czr", "t20": "t20_czr", "c": "c_czr"},
-        "Bet365":     {"w": "w_365", "t5": "t5_365", "t10": "t10_365", "t20": "t20_365", "c": "c_365"},
-        "theScore":   {"w": "w_score","t5":"t5_score","t10":"t10_score","t20":"t20_score","c": "c_score"},
+                "theScore":   {"w": "w_score","t5":"t5_score","t10":"t10_score","t20":"t20_score","c": "c_score"},
         "Hard Rock":  {"w": "w_hr",  "t5": "t5_hr",  "t10": "t10_hr",  "t20": "t20_hr",  "c": "c_hr"},
     }
 
     BOOK_MK_PREFIX = {
         "DraftKings": "draftkings", "FanDuel": "fanduel",   "BetMGM": "betmgm",
-        "Caesars":    "caesars",    "Bet365":  "bet365",    "theScore": "thescore",
+        "Caesars":    "caesars",    "theScore": "thescore",
         "Hard Rock":  "hardrock",
     }
 
