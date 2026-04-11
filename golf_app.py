@@ -336,7 +336,7 @@ st.markdown(f"""
     <h1>⛳ Golf Betting Model</h1>
     <div class="subtitle">DataGolf + The Odds API · Live Tournament Intelligence</div>
   </div>
-  <div class="badge">{live_badge}</div>
+  <div class="badge">LIVE DATA</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -550,7 +550,7 @@ with c4:
     st.markdown(f"""<div class="metric-card">
         <div class="label">Last Synced</div>
         <div class="value" style="font-size:1rem">{now_et()}</div>
-        <div class="sub">{(datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%b %d, %Y")} · {h2h_sharp} H2H sharp plays</div>
+        <div class="sub">{live_badge} · {h2h_sharp} H2H sharp plays</div>
     </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
