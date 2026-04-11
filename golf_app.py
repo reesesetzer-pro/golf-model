@@ -552,8 +552,8 @@ with tab1:
             continue
         e_w = edge_pct(p["w_dg_p"], p["w_best"])
         if e_w is None: e_w = 0
-        # Suppress win edge if using stale pre-tournament prob (not live)
-        if not p.get("w_prob_is_live") and live_pred_by_id:
+        # Suppress win edge if player has no live prob (still on pre-tournament baseline)
+        if not p.get("w_prob_is_live"):
             e_w = 0
         if e_w < min_edge:
             continue
@@ -663,7 +663,7 @@ with tab2:
         prob  = p.get(prob_key)
         best  = p.get(best_key)
         # For win market, suppress edge if prob is stale baseline
-        if mk == "w" and not p.get("w_prob_is_live") and live_pred_by_id:
+        if mk == "w" and not p.get("w_prob_is_live"):
             e = 0.0
             sv_edge, sv = None, None
         else:
