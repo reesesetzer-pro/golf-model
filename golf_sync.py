@@ -806,6 +806,22 @@ def _normalize_name(name: str) -> str:
         return f"{parts[-1]}, {' '.join(parts[:-1])}"
     return name
 
+def discover_active_golf_sports() -> set:
+    """Query The Odds API /sports to find which golf sport keys are currently active."""
+    data = odds_get("sports", {"all": "true"})
+    if not data:
+        log.warning("Could not fetch Odds API sports list — will attempt all known keys")
+        return set(GOLF_FINISH_MARKET_MAP.keys())
+    active = {s["key"] for s in data if "golf" in s.get("key", "") and s.get("active")}
+    all_golf = {s["key"] for s in data if "golf" in s.get("key", "")}
+    known = set(GOLF_FINISH_MARKET_MAP.keys())
+    missing = known - all_golf
+    if missing:
+        log.warning(f"  Market keys NOT found on Odds API: {sorted(missing)}")
+    log.info(f"  Active golf sport keys ({len(active)}): {sorted(active)}")
+    return active
+
+
 def sync_odds_api_to_finish_odds():
     """Pull live finish position odds from The Odds API and overwrite finish_odds.
     This replaces stale DataGolf outrights data with real-time book lines."""
@@ -813,7 +829,15 @@ def sync_odds_api_to_finish_odds():
     book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
     now = now_utc()
 
+    active_sports = discover_active_golf_sports()
+    markets_found = []
+    markets_empty = []
+
     for sport_key, market in GOLF_FINISH_MARKET_MAP.items():
+        if sport_key not in active_sports:
+            log.info(f"  Skipping {sport_key} — not active on Odds API")
+            markets_empty.append(f"{sport_key} ({market})")
+            continue
         data = odds_get(f"sports/{sport_key}/odds", {
             "regions":    ODDS_REGION,
             "markets":    "outrights",
@@ -865,9 +889,17 @@ def sync_odds_api_to_finish_odds():
                         on_conflict="event_id,market,player_name"
                     ).execute()
                     log.info(f"  ✓ finish_odds ({market} via Odds API) — {len(rows)} rows")
+                    markets_found.append(f"{sport_key} ({market})")
                 except Exception as e:
                     log.warning(f"  finish_odds upsert failed for {market}: {e}")
+            else:
+                markets_empty.append(f"{sport_key} ({market})")
         time.sleep(0.3)
+
+    if markets_found:
+        log.info(f"  Markets with data: {markets_found}")
+    if markets_empty:
+        log.warning(f"  Markets with NO data: {markets_empty}")
 
 
 def sync_book_odds():

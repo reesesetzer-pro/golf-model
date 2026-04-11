@@ -298,6 +298,13 @@ def edge_pct(dg_prob_pct, book_odds):
     imp = american_to_implied(book_odds)
     return round(dg_prob_pct - imp, 2) if imp else None
 
+def color_sharp(val):
+    if isinstance(val, str):
+        if "STRONG" in val: return "background-color:#1a3a1a; color:#69f0ae; font-weight:700"
+        if "SHARP"  in val: return "background-color:#1e3320; color:#a5d6a7; font-weight:600"
+        if "VALUE"  in val: return "background-color:#1b2e1b; color:#81c784"
+    return ""
+
 SHARP_THRESHOLDS = {
     "win":      2.0,
     "top_5":    3.0,
@@ -518,24 +525,19 @@ with c4:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
-    "📊 Tournament Forecast",
-    "💰 Finish Odds + Edge",
-    "⚔️ H2H Matchup Tool",
-    "🎯 Best H2H Plays",
-    "🏆 Live Leaderboard",
-    "📝 Results Tracker",
-    "📈 Skill Ratings",
-    "🏌️ Course History",
-    "🔴 Live Matchups",
-    "⚙️ Auto Scheduler",
-    "📚 Best Plays by Book",
+tab_forecast, tab_edges, tab_h2h, tab_live, tab_tracker, tab_research = st.tabs([
+    "📊 Forecast",
+    "💰 Edges",
+    "⚔️ H2H",
+    "🔴 Live",
+    "📝 Tracker",
+    "🏌️ Research",
 ])
 
 # ════════════════════════════════════════════════════════════
-# TAB 1 — TOURNAMENT FORECAST
+# VIEW: TOURNAMENT FORECAST
 # ════════════════════════════════════════════════════════════
-with tab1:
+def _render_tournament_forecast():
     st.markdown('<div class="section-header">Tournament Win / Finish Probabilities</div>', unsafe_allow_html=True)
 
     col_filter, col_sort, col_min = st.columns([2, 2, 2])
@@ -640,9 +642,9 @@ with tab1:
         st.info("No players match the current filters.")
 
 # ════════════════════════════════════════════════════════════
-# TAB 2 — FINISH ODDS + EDGE
+# VIEW: FINISH ODDS + EDGE
 # ════════════════════════════════════════════════════════════
-with tab2:
+def _render_finish_odds():
     st.markdown('<div class="section-header">Finish Position Odds — Best Available Across All Books</div>', unsafe_allow_html=True)
 
     market_sel = st.radio("Market", ["Win", "Top 5", "Top 10", "Top 20", "Make Cut"],
@@ -775,9 +777,9 @@ with tab2:
     </div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
-# TAB 3 — H2H MATCHUP TOOL
+# VIEW: H2H MATCHUP TOOL
 # ════════════════════════════════════════════════════════════
-with tab3:
+def _render_matchup_tool():
     st.markdown('<div class="section-header">Head-to-Head Player Comparison</div>', unsafe_allow_html=True)
 
     player_names = [p["name"] for p in field_players]
@@ -885,9 +887,9 @@ with tab3:
                 st.info("No course history available.")
 
 # ════════════════════════════════════════════════════════════
-# TAB 4 — BEST H2H PLAYS
+# VIEW: BEST H2H PLAYS
 # ════════════════════════════════════════════════════════════
-with tab4:
+def _render_best_h2h():
     st.markdown('<div class="section-header">🎯 Best H2H Plays Today — Ranked by Edge</div>', unsafe_allow_html=True)
 
     st.markdown("""<div class="info-box">
@@ -1075,9 +1077,9 @@ with tab4:
 
 
 # ════════════════════════════════════════════════════════════
-# TAB 5 — LIVE LEADERBOARD
+# VIEW: LIVE LEADERBOARD
 # ════════════════════════════════════════════════════════════
-with tab5:
+def _render_leaderboard():
     st.markdown('<div class="section-header">🏆 Live Leaderboard — Masters Tournament</div>', unsafe_allow_html=True)
 
     @st.cache_data(ttl=60)
@@ -1098,10 +1100,10 @@ with tab5:
             pos   = p.get("current_pos")
             score = p.get("current_score")
             thru  = p.get("thru")
-            win   = (p.get("win_prob") or 0) * 100
-            t5    = (p.get("top5_prob") or 0) * 100
-            t10   = (p.get("top10_prob") or 0) * 100
-            cut   = (p.get("make_cut_prob") or 0) * 100
+            win   = american_to_implied(p.get("win_prob")) or 0
+            t5    = american_to_implied(p.get("top5_prob")) or 0
+            t10   = american_to_implied(p.get("top10_prob")) or 0
+            cut   = american_to_implied(p.get("make_cut_prob")) or 0
 
             # Find player's pre-tournament win prob for comparison
             fp = next((x for x in field_players if x["name"] == p.get("player_name")), {})
@@ -1178,9 +1180,9 @@ with tab5:
 
 
 # ════════════════════════════════════════════════════════════
-# TAB 6 — RESULTS TRACKER (LEARNING SYSTEM)
+# VIEW: RESULTS TRACKER
 # ════════════════════════════════════════════════════════════
-with tab6:
+def _render_tracker():
     st.markdown('<div class="section-header">📝 Results Tracker — Bet Log, P&L & Learning Analytics</div>', unsafe_allow_html=True)
 
     @st.cache_data(ttl=30)
@@ -1608,9 +1610,9 @@ with tab6:
 
 
 # ════════════════════════════════════════════════════════════
-# TAB 7 — SKILL RATINGS
+# VIEW: SKILL RATINGS
 # ════════════════════════════════════════════════════════════
-with tab7:
+def _render_skill_ratings():
     st.markdown('<div class="section-header">DataGolf Player Skill Ratings — All Ranked Players</div>', unsafe_allow_html=True)
 
     col_f, col_t = st.columns([3, 1])
@@ -1659,9 +1661,9 @@ with tab7:
         st.caption(f"{len(df4)} players shown")
 
 # ════════════════════════════════════════════════════════════
-# TAB 5 — COURSE HISTORY
+# VIEW: COURSE HISTORY
 # ════════════════════════════════════════════════════════════
-with tab8:
+def _render_course_history():
     st.markdown(f'<div class="section-header">Course History — {current_event}</div>', unsafe_allow_html=True)
 
     ch_rows = []
@@ -1715,9 +1717,9 @@ with tab8:
         st.info("Course history will populate as rounds are completed during the tournament.")
 
 # ════════════════════════════════════════════════════════════
-# TAB 6 — LIVE MATCHUPS
+# VIEW: LIVE MATCHUPS
 # ════════════════════════════════════════════════════════════
-with tab9:
+def _render_live_matchups():
     st.markdown('<div class="section-header">Live Round H2H Matchup Odds — DataGolf Model</div>', unsafe_allow_html=True)
 
     if matchups:
@@ -1778,9 +1780,9 @@ with tab9:
 
 
 # ════════════════════════════════════════════════════════════
-# TAB 10 — AUTO SCHEDULER
+# VIEW: AUTO SCHEDULER
 # ════════════════════════════════════════════════════════════
-with tab10:
+def _render_auto_scheduler():
     st.markdown('<div class="section-header">⚙️ Auto Scheduler — Windows Task Scheduler Setup</div>', unsafe_allow_html=True)
 
     st.markdown("""<div class="info-box">
@@ -1854,9 +1856,9 @@ py golf_sync.py
 Complete sync of all tables including historical data""")
 
 # ════════════════════════════════════════════════════════════
-# TAB 11 — BEST PLAYS BY BOOK
+# VIEW: BEST PLAYS BY BOOK
 # ════════════════════════════════════════════════════════════
-with tab11:
+def _render_best_plays_by_book():
     st.markdown('<div class="section-header">📚 Best Plays by Book — Where to Bet Today</div>', unsafe_allow_html=True)
     st.markdown("""<div class="info-box">
         Top edges available at each sportsbook across all markets (Finish Position + H2H).
@@ -2019,6 +2021,50 @@ with tab11:
             <code>py golf_sync.py --mode live</code>
         </div>""", unsafe_allow_html=True)
 
+
+# ── Tab routing ──────────────────────────────────────────────────────────────────
+with tab_forecast:
+    _fv = st.radio("", ["📊 Tournament Forecast", "📈 Skill Ratings"],
+                   horizontal=True, label_visibility="collapsed", key="tab_fv")
+    if _fv == "📊 Tournament Forecast":
+        _render_tournament_forecast()
+    else:
+        _render_skill_ratings()
+
+with tab_edges:
+    _ev = st.radio("", ["💰 Finish Odds + Edge", "📚 Best Plays by Book"],
+                   horizontal=True, label_visibility="collapsed", key="tab_ev")
+    if _ev == "💰 Finish Odds + Edge":
+        _render_finish_odds()
+    else:
+        _render_best_plays_by_book()
+
+with tab_h2h:
+    _hv = st.radio("", ["🎯 Best H2H Plays", "⚔️ Matchup Tool"],
+                   horizontal=True, label_visibility="collapsed", key="tab_hv")
+    if _hv == "🎯 Best H2H Plays":
+        _render_best_h2h()
+    else:
+        _render_matchup_tool()
+
+with tab_live:
+    _lv = st.radio("", ["🏆 Live Leaderboard", "🔴 Live Matchups"],
+                   horizontal=True, label_visibility="collapsed", key="tab_lv")
+    if _lv == "🏆 Live Leaderboard":
+        _render_leaderboard()
+    else:
+        _render_live_matchups()
+
+with tab_tracker:
+    _tv = st.radio("", ["📝 Results Tracker", "⚙️ Auto Scheduler"],
+                   horizontal=True, label_visibility="collapsed", key="tab_tv")
+    if _tv == "📝 Results Tracker":
+        _render_tracker()
+    else:
+        _render_auto_scheduler()
+
+with tab_research:
+    _render_course_history()
 
 # ── Footer ───────────────────────────────────────────────────────────────────────
 st.markdown("---")
