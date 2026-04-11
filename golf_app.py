@@ -1374,15 +1374,7 @@ def _render_tracker():
         else:
             st.markdown('<div class="section-header">📊 Edge Tier Performance — Are the sharp plays actually hitting?</div>', unsafe_allow_html=True)
 
-            # Edge tier breakdown
-            def edge_tier(e):
-                e = float(e or 0)
-                if e >= 5:   return "🔥🔥 STRONG (5%+)"
-                if e >= 3:   return "🔥 SHARP (3-5%)"
-                if e >= 2:   return "✅ VALUE (2-3%)"
-                if e >= 0:   return "Below Threshold"
-                return "Manual / No Edge"
-
+            # Edge tier breakdown (uses module-level edge_tier)
             tier_stats = {}
             for b in settled:
                 tier = edge_tier(b.get("edge_at_bet", 0))
