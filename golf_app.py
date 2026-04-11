@@ -681,6 +681,19 @@ with tab1:
 with tab2:
     st.markdown('<div class="section-header">Finish Position Odds — Best Available Across All Books</div>', unsafe_allow_html=True)
 
+    # Check how stale finish_odds data is
+    if fin_odds:
+        try:
+            latest = max(fo.get("updated_at","") for fo in fin_odds if fo.get("updated_at"))
+            lu = datetime.fromisoformat(latest.replace("Z","+00:00"))
+            age_mins = (datetime.now(timezone.utc) - lu).total_seconds() / 60
+            if age_mins > 20:
+                st.warning(f"⚠️ Finish odds are {int(age_mins)} min old — sourced from DataGolf outrights which lag live book prices. **Always verify the line on the book before betting.**")
+            else:
+                st.info(f"📡 Finish odds from DataGolf · {int(age_mins)} min ago · Lines may lag live book prices by 10–30 min — verify before betting")
+        except:
+            pass
+
     market_sel = st.radio("Market", ["Win", "Top 5", "Top 10", "Top 20", "Make Cut"],
                           horizontal=True, label_visibility="collapsed")
 
