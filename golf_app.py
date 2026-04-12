@@ -70,6 +70,8 @@ with st.sidebar:
     st.markdown("### 💰 Quick Bet Settings")
     default_stake = st.number_input("Default Stake ($)", value=10.0, step=5.0, key="default_stake")
     st.caption("Used when clicking 🎯 Take It on any play")
+    bankroll_setting = st.number_input("Bankroll ($)", value=500.0, step=100.0, key="bankroll")
+    st.caption("Used for Kelly stake sizing in the Alerts tab")
 
 # ── Theme / CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -2067,136 +2069,538 @@ def _render_best_plays_by_book():
 
 
 # ════════════════════════════════════════════════════════════
+# LEARNING ENGINE — helpers for Alerts tab
+# ════════════════════════════════════════════════════════════
+
+_LE_BUCKETS = [
+    (0,  25,  "0-25%"),
+    (25, 35,  "25-35%"),
+    (35, 45,  "35-45%"),
+    (45, 55,  "45-55%"),
+    (55, 65,  "55-65%"),
+    (65, 101, "65%+"),
+]
+_LE_BUCKET_ORDER = [lb for *_, lb in _LE_BUCKETS]
+_BASE_THRESHOLDS = {"Win": 20.0, "Top 5": 40.0, "Top 10": 55.0}
+
+
+def _breakeven_odds(prob_pct):
+    """American odds at which a bet breaks even given model probability."""
+    if not prob_pct or prob_pct <= 0:
+        return None
+    p = prob_pct / 100
+    if p >= 0.5:
+        return int(round(-(p / (1 - p)) * 100))
+    return int(round(((1 - p) / p) * 100))
+
+
+def _compute_learning_engine(settled_bets):
+    """
+    Returns (calibration, mkt_roi, adaptive) from settled bet history.
+    DG probability is reconstructed as implied_prob + edge_at_bet — both
+    fields are written automatically by quick_log_bet.
+    """
+    # ─ Calibration by probability bucket ─────────────────────────────────────
+    cd = {lb: {"psum": 0.0, "wins": 0, "n": 0} for *_, lb in _LE_BUCKETS}
+    for b in settled_bets:
+        dg = float(b.get("implied_prob") or 0) + float(b.get("edge_at_bet") or 0)
+        if dg <= 0:
+            continue
+        is_win = b.get("result") == "Win"
+        for lo, hi, lb in _LE_BUCKETS:
+            if lo <= dg < hi:
+                cd[lb]["psum"] += dg
+                cd[lb]["wins"] += 1 if is_win else 0
+                cd[lb]["n"]    += 1
+                break
+
+    calibration = {}
+    for lb, s in cd.items():
+        if s["n"] < 2:
+            continue
+        pred   = s["psum"] / s["n"]
+        actual = s["wins"] / s["n"] * 100
+        calibration[lb] = {
+            "predicted": round(pred, 1),
+            "actual":    round(actual, 1),
+            "n":         s["n"],
+            "ratio":     round(actual / pred, 3) if pred > 0 else 1.0,
+            "diff":      round(actual - pred, 1),
+        }
+
+    # ─ Market ROI ─────────────────────────────────────────────────────────────
+    ms = {}
+    for b in settled_bets:
+        mkt = b.get("market", "Unknown")
+        ms.setdefault(mkt, {"n": 0, "wins": 0, "staked": 0.0, "pl": 0.0})
+        ms[mkt]["n"]      += 1
+        ms[mkt]["wins"]   += 1 if b.get("result") == "Win" else 0
+        ms[mkt]["staked"] += float(b.get("stake") or 0)
+        ms[mkt]["pl"]     += float(b.get("profit_loss") or 0)
+
+    mkt_roi = {}
+    for mkt, s in ms.items():
+        roi = (s["pl"] / s["staked"] * 100) if s["staked"] else 0.0
+        mkt_roi[mkt] = {
+            "n":        s["n"],
+            "roi":      round(roi, 1),
+            "win_rate": round(s["wins"] / s["n"] * 100, 1) if s["n"] else 0.0,
+            "pl":       round(s["pl"], 2),
+            "staked":   round(s["staked"], 2),
+        }
+
+    # ─ Adaptive thresholds ────────────────────────────────────────────────────
+    adaptive = {}
+    for mkt, base in _BASE_THRESHOLDS.items():
+        md = mkt_roi.get(mkt, {})
+        n  = md.get("n", 0)
+        if n < 5:
+            adaptive[mkt] = {
+                "threshold": base, "base": base, "delta": 0,
+                "note": f"<5 bets settled — using base {base:.0f}%",
+                "status": "neutral",
+            }
+            continue
+        roi = md["roi"]
+        if   roi < -15: delta, status = +10, "tight"
+        elif roi < -5:  delta, status = +5,  "tight"
+        elif roi < 0:   delta, status = +3,  "watch"
+        elif roi > 20:  delta, status = -5,  "loose"
+        elif roi > 10:  delta, status = -2,  "loose"
+        else:           delta, status =  0,  "good"
+        adaptive[mkt] = {
+            "threshold": round(max(5.0, base + delta), 1),
+            "base":      base,
+            "delta":     delta,
+            "note":      f"ROI {roi:+.1f}% over {n} bets",
+            "status":    status,
+        }
+
+    return calibration, mkt_roi, adaptive
+
+
+def _calib_factor(dg_prob, calibration):
+    """Ratio of actual/predicted hit rate at this probability level (1.0 = perfectly calibrated)."""
+    for lo, hi, lb in _LE_BUCKETS:
+        if lo <= dg_prob < hi and lb in calibration:
+            return calibration[lb]["ratio"]
+    return 1.0
+
+
+def _calib_note(dg_prob, calibration):
+    """One-line calibration note for an alert card."""
+    for lo, hi, lb in _LE_BUCKETS:
+        if lo <= dg_prob < hi:
+            if lb not in calibration:
+                return f"{lb} bucket — no bet history yet"
+            c     = calibration[lb]
+            arrow = "↑" if c["diff"] >= 0 else "↓"
+            perf  = ("overperforms" if c["diff"] > 2
+                     else "on target" if abs(c["diff"]) <= 2
+                     else "underperforms")
+            return (f"{lb} bucket: DG predicts {c['predicted']:.0f}%, "
+                    f"historically hits {c['actual']:.0f}% "
+                    f"({arrow}{abs(c['diff']):.0f}pp — {perf}) · n={c['n']}")
+    return "—"
+
+
+def _confidence_score(dg_prob, market, calibration, mkt_roi):
+    """
+    0-100 composite confidence score.
+    Base: DG probability (up to 75 pts)
+    + Calibration adjustment: ±15 pts based on actual vs predicted hit rate
+    + Market ROI adjustment: ±10 pts based on historical P&L in this market
+    """
+    base      = min(dg_prob * 0.9, 75.0)
+    cf        = _calib_factor(dg_prob, calibration)
+    calib_adj = max(-15.0, min(15.0, (cf - 1.0) * 20.0))
+    md        = mkt_roi.get(market, {})
+    mkt_adj   = max(-10.0, min(10.0, md["roi"] * 0.4)) if md.get("n", 0) >= 3 else 0.0
+    return max(0, min(100, round(base + calib_adj + mkt_adj)))
+
+
+def _kelly_stake(dg_prob_pct, book_odds_american, bankroll, fraction=0.5):
+    """Half-Kelly recommended stake. Returns 0 if no edge, None if inputs missing."""
+    if not book_odds_american or bankroll <= 0:
+        return None
+    p = dg_prob_pct / 100.0
+    o = float(book_odds_american)
+    b = (o / 100.0) if o > 0 else (100.0 / abs(o))   # profit per $1 staked
+    kelly_f = (b * p - (1.0 - p)) / b
+    if kelly_f <= 0:
+        return 0.0
+    return round(max(1.0, kelly_f * fraction * bankroll), 2)
+
+
+# ════════════════════════════════════════════════════════════
 # VIEW: LIVE ALERTS
 # ════════════════════════════════════════════════════════════
 def _render_live_alerts():
-    st.markdown('<div class="section-header">🚨 Live Model Alerts — Take These Now</div>', unsafe_allow_html=True)
-
+    # ─ Data ──────────────────────────────────────────────────────────────────────
     @st.cache_data(ttl=60)
     def load_alert_data():
         sb = get_supabase()
-        return sb.table("live_predictions").select("*").order("current_pos").execute().data
+        live = sb.table("live_predictions").select("*").order("current_pos").execute().data or []
+        bets = sb.table("bets").select(
+            "implied_prob,edge_at_bet,result,market,stake,profit_loss"
+        ).execute().data or []
+        return live, bets
 
-    live = load_alert_data()
-
-    if not live or not any(p.get("thru", 0) for p in live):
-        st.markdown("""<div class="info-box">
-            ⏳ Alerts populate once the round begins — live DataGolf probabilities needed.
-        </div>""", unsafe_allow_html=True)
-        return
-
-    def breakeven_odds(prob_pct):
-        if not prob_pct or prob_pct <= 0: return None
-        p = prob_pct / 100
-        if p >= 0.5:
-            return int(round(-(p / (1 - p)) * 100))
-        else:
-            return int(round(((1 - p) / p) * 100))
+    live, all_bets   = load_alert_data()
+    settled          = [b for b in all_bets if b.get("result") not in ("Pending", None, "Void")]
+    bankroll         = float(st.session_state.get("bankroll", 500.0))
+    calibration, mkt_roi, adaptive = _compute_learning_engine(settled)
 
     ALERT_MARKETS = [
-        ("Win",    "win_prob",    20.0),
-        ("Top 5",  "top5_prob",   40.0),
-        ("Top 10", "top10_prob",  55.0),
+        ("Win",    "win_prob",   "Win"),
+        ("Top 5",  "top5_prob",  "Top 5"),
+        ("Top 10", "top10_prob", "Top 10"),
     ]
+    BOOKS = ["DraftKings", "FanDuel", "BetMGM", "Caesars", "Bet365", "theScore", "Hard Rock"]
 
-    alerts = []
-    for p in live:
-        if not (p.get("thru") or 0): continue
-        pos = p.get("current_pos") or 999
-        for mkt_label, prob_field, threshold in ALERT_MARKETS:
-            prob = american_to_implied(p.get(prob_field)) or 0
-            if prob < threshold: continue
-            be  = breakeven_odds(prob)
-            alerts.append({
-                "player": p.get("player_name", ""),
-                "pos":    pos,
-                "market": mkt_label,
-                "prob":   prob,
-                "be_odds": f"+{be}" if be and be > 0 else str(be),
-                "be_val":  be,
-            })
+    st.markdown('<div class="section-header">🚨 Live Model Alerts — Learning Engine</div>',
+                unsafe_allow_html=True)
 
-    alerts.sort(key=lambda x: -x["prob"])
+    # ─ Engine summary cards ───────────────────────────────────────────────────────
+    live_round = any((p.get("thru") or 0) > 0 for p in live)
 
-    if not alerts:
-        st.markdown("""<div class="info-box">
-            No players above thresholds right now (Win &gt;20% · Top 5 &gt;40% · Top 10 &gt;55%).
-            Check back as the round progresses.
+    if calibration:
+        avg_err = sum(abs(v["diff"]) for v in calibration.values()) / len(calibration)
+        if avg_err < 5:    calib_badge, calib_color = "🟢 Sharp",    "#69f0ae"
+        elif avg_err < 10: calib_badge, calib_color = "🟡 Drifting", "#ffcc02"
+        else:              calib_badge, calib_color = "🔴 Off",      "#ef9a9a"
+    else:
+        calib_badge, calib_color, avg_err = "⚪ No data yet", "#90a4ae", 0.0
+
+    best_mkt     = max(mkt_roi, key=lambda m: mkt_roi[m]["roi"]) if mkt_roi else None
+    best_mkt_roi = mkt_roi[best_mkt]["roi"] if best_mkt else 0.0
+
+    t_win = adaptive.get("Win",    {}).get("threshold", _BASE_THRESHOLDS["Win"])
+    t_t5  = adaptive.get("Top 5",  {}).get("threshold", _BASE_THRESHOLDS["Top 5"])
+    t_t10 = adaptive.get("Top 10", {}).get("threshold", _BASE_THRESHOLDS["Top 10"])
+
+    n_alerts = 0
+    if live_round:
+        for p in live:
+            if not (p.get("thru") or 0):
+                continue
+            for _, prob_field, mkt_key in ALERT_MARKETS:
+                prob = american_to_implied(p.get(prob_field)) or 0
+                if prob >= adaptive.get(mkt_key, {}).get("threshold",
+                                        _BASE_THRESHOLDS.get(mkt_key, 20)):
+                    n_alerts += 1
+
+    sm1, sm2, sm3 = st.columns(3)
+    with sm1:
+        st.markdown(f"""<div class="metric-card">
+            <div class="label">Model Calibration</div>
+            <div class="value" style="color:{calib_color}">{calib_badge}</div>
+            <div class="sub">{len(calibration)} buckets tracked · avg {avg_err:.1f}pp error</div>
         </div>""", unsafe_allow_html=True)
-        return
+    with sm2:
+        roi_c = "#69f0ae" if best_mkt_roi > 0 else "#ef9a9a"
+        st.markdown(f"""<div class="metric-card">
+            <div class="label">Best Market ROI</div>
+            <div class="value" style="color:{roi_c}">{best_mkt_roi:+.1f}%</div>
+            <div class="sub">{best_mkt or "—"} · {len(settled)} settled bets</div>
+        </div>""", unsafe_allow_html=True)
+    with sm3:
+        al_c = "#69f0ae" if n_alerts > 0 else "#90a4ae"
+        st.markdown(f"""<div class="metric-card">
+            <div class="label">Active Signals</div>
+            <div class="value" style="color:{al_c}">{n_alerts}</div>
+            <div class="sub">Win ≥{t_win:.0f}% · T5 ≥{t_t5:.0f}% · T10 ≥{t_t10:.0f}%</div>
+        </div>""", unsafe_allow_html=True)
 
-    st.markdown(f"""<div class="info-box">
-        {len(alerts)} live signal{'s' if len(alerts) != 1 else ''} ·
-        Enter the odds you see on your book — edge calculates instantly
-    </div>""", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    BOOKS = ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","theScore","Hard Rock"]
-
-    for i, a in enumerate(alerts):
-        border = "#69f0ae" if a["prob"] >= 65 else ("#a5d6a7" if a["prob"] >= 50 else "#81c784")
-        col_card, col_btn = st.columns([5, 1])
-        with col_card:
+    # ─ Adaptive threshold status row ─────────────────────────────────────────────
+    st.markdown("**Adaptive Thresholds** — recalibrate weekly as your bet history builds")
+    AT_COLORS = {"neutral": "#90a4ae", "good": "#69f0ae",
+                 "loose": "#a5d6a7",   "watch": "#ffcc02", "tight": "#ef9a9a"}
+    AT_LABELS = {"neutral": "⚪ Base",  "good": "🟢 Calibrated",
+                 "loose": "🟢 Loosened","watch": "🟡 Watching","tight": "🔴 Tightened"}
+    tc1, tc2, tc3 = st.columns(3)
+    for col, mkt_key in zip([tc1, tc2, tc3], ["Win", "Top 5", "Top 10"]):
+        ad     = adaptive.get(mkt_key, {})
+        t      = ad.get("threshold", _BASE_THRESHOLDS.get(mkt_key, 20))
+        delta  = ad.get("delta", 0)
+        status = ad.get("status", "neutral")
+        note   = ad.get("note", "—")
+        color  = AT_COLORS[status]
+        label  = AT_LABELS[status]
+        d_str  = f" ({'+' if delta > 0 else ''}{delta:.0f}pp)" if delta != 0 else ""
+        with col:
             st.markdown(f"""
-            <div style="border-left:4px solid {border}; padding:12px 16px; margin:6px 0;
-                        background:#1a1a1a; border-radius:4px;">
-                <div style="font-size:1.05rem; font-weight:700; color:{border}">
-                    🎯 {a['player']} — {a['market']}
-                    <span style="color:#888; font-weight:400; font-size:0.85rem; margin-left:8px">T{a['pos']}</span>
-                </div>
-                <div style="color:#90a4ae; font-size:0.88rem; margin-top:4px">
-                    DG Model: <b style="color:{border}">{a['prob']:.1f}%</b> &nbsp;·&nbsp;
-                    Take any odds better than <b style="color:#fff; font-size:0.95rem">{a['be_odds']}</b>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_btn:
-            if st.button("📝 Log", key=f"al_open_{i}"):
-                st.session_state[f"al_form_{i}"] = not st.session_state.get(f"al_form_{i}", False)
+            <div style="background:#1a1a1a; border:1px solid {color}; border-radius:6px;
+                        padding:10px 14px; margin:4px 0;">
+                <div style="font-size:0.72rem; color:#81c784; text-transform:uppercase;
+                             letter-spacing:0.08em; margin-bottom:2px">{mkt_key}</div>
+                <div style="font-size:1.5rem; font-weight:700; color:{color}">{t:.0f}%{d_str}</div>
+                <div style="font-size:0.75rem; color:{color}">{label}</div>
+                <div style="font-size:0.72rem; color:#90a4ae; margin-top:3px">{note}</div>
+            </div>""", unsafe_allow_html=True)
 
-        if st.session_state.get(f"al_form_{i}"):
-            with st.container():
-                fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 1])
-                with fc1:
-                    q_book  = st.selectbox("Book", BOOKS, key=f"al_bk_{i}")
-                with fc2:
-                    q_odds  = st.number_input("Odds", value=0, step=5, key=f"al_od_{i}",
-                                              help="American odds — e.g. -150 or +320")
-                with fc3:
-                    q_stake = st.number_input("Stake $", value=float(st.session_state.get("default_stake", 10)), step=5.0, key=f"al_st_{i}")
-                with fc4:
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ─ Live alert cards ───────────────────────────────────────────────────────────
+    if not live_round:
+        st.markdown("""<div class="info-box">
+            ⏳ Live signals appear once the round begins.<br>
+            Calibration and market analytics below are always available.
+        </div>""", unsafe_allow_html=True)
+    else:
+        alerts = []
+        for p in live:
+            if not (p.get("thru") or 0):
+                continue
+            pos = p.get("current_pos") or 999
+            for mkt_label, prob_field, mkt_key in ALERT_MARKETS:
+                prob      = american_to_implied(p.get(prob_field)) or 0
+                threshold = adaptive.get(mkt_key, {}).get("threshold",
+                            _BASE_THRESHOLDS.get(mkt_key, 20))
+                if prob < threshold:
+                    continue
+                be_val = _breakeven_odds(prob)
+                be_str = (f"+{be_val}" if be_val and be_val > 0 else str(be_val)) if be_val else "—"
+                score  = _confidence_score(prob, mkt_key, calibration, mkt_roi)
+                ks     = _kelly_stake(prob, be_val, bankroll)
+                alerts.append({
+                    "player":      p.get("player_name", ""),
+                    "pos":         pos,
+                    "market":      mkt_label,
+                    "mkt_key":     mkt_key,
+                    "prob":        prob,
+                    "be_str":      be_str,
+                    "be_val":      be_val,
+                    "score":       score,
+                    "kelly":       ks,
+                    "calib_note":  _calib_note(prob, calibration),
+                    "calib_ratio": _calib_factor(prob, calibration),
+                })
+        alerts.sort(key=lambda x: -x["score"])
+
+        if not alerts:
+            st.markdown(f"""<div class="info-box">
+                No signals above adaptive thresholds right now
+                (Win ≥{t_win:.0f}% · Top 5 ≥{t_t5:.0f}% · Top 10 ≥{t_t10:.0f}%).<br>
+                Thresholds tighten/loosen automatically as your bet history builds.
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"**{len(alerts)} signal{'s' if len(alerts) != 1 else ''}** — "
+                        "ranked by confidence score")
+            st.caption("Confidence = DG probability × calibration accuracy × market ROI history. "
+                       "Kelly stake scales to your bankroll (sidebar).")
+
+            for i, a in enumerate(alerts):
+                sc = a["score"]
+                if sc >= 70:   border, tier = "#69f0ae", "HIGH CONFIDENCE"
+                elif sc >= 50: border, tier = "#ffcc02", "MED CONFIDENCE"
+                else:          border, tier = "#81c784", "LOW CONFIDENCE"
+
+                cf     = a["calib_ratio"]
+                cf_c   = "#69f0ae" if cf >= 1.05 else ("#ef9a9a" if cf < 0.90 else "#90a4ae")
+                bar    = "█" * round(sc / 10) + "░" * (10 - round(sc / 10))
+                ks_str = f"${a['kelly']:.0f}" if (a["kelly"] and a["kelly"] > 0) else "No edge"
+
+                c_card, c_btn = st.columns([6, 1])
+                with c_card:
+                    st.markdown(f"""
+                    <div style="border-left:4px solid {border}; padding:14px 18px; margin:8px 0;
+                                background:#1a1a1a; border-radius:4px;">
+                        <div style="display:flex; justify-content:space-between; align-items:baseline">
+                            <span style="font-size:1.08rem; font-weight:700; color:{border}">
+                                🎯 {a['player']} — {a['market']}
+                                <span style="color:#777; font-weight:400; font-size:0.83rem;
+                                            margin-left:8px">T{a['pos']}</span>
+                            </span>
+                            <span style="font-size:0.78rem; color:{border};
+                                         font-weight:600">{tier}</span>
+                        </div>
+                        <div style="display:flex; gap:28px; flex-wrap:wrap; margin-top:8px">
+                            <div>
+                                <div style="color:#90a4ae; font-size:0.75rem">DG Model</div>
+                                <div style="color:{border}; font-weight:700; font-size:1.1rem">{a['prob']:.1f}%</div>
+                            </div>
+                            <div>
+                                <div style="color:#90a4ae; font-size:0.75rem">Confidence</div>
+                                <div style="font-family:monospace; font-size:0.9rem; color:{border}">{bar} {sc}/100</div>
+                            </div>
+                            <div>
+                                <div style="color:#90a4ae; font-size:0.75rem">Breakeven</div>
+                                <div style="color:#fff; font-weight:700; font-size:1rem">{a['be_str']}</div>
+                            </div>
+                            <div>
+                                <div style="color:#90a4ae; font-size:0.75rem">½-Kelly on ${bankroll:.0f}</div>
+                                <div style="color:#ffcc02; font-weight:700; font-size:1rem">{ks_str}</div>
+                            </div>
+                        </div>
+                        <div style="color:{cf_c}; font-size:0.76rem; margin-top:7px">
+                            📊 {a['calib_note']}
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+                with c_btn:
                     st.markdown("<br>", unsafe_allow_html=True)
-                    log_btn = st.button("✅ Log", key=f"al_log_{i}")
+                    if st.button("📝 Log", key=f"al_open_{i}"):
+                        st.session_state[f"al_form_{i}"] = not st.session_state.get(
+                            f"al_form_{i}", False)
 
-                if q_odds != 0:
-                    q_implied = american_to_implied(q_odds) or 0
-                    q_edge    = round(a["prob"] - q_implied, 2)
-                    edge_col  = "#69f0ae" if q_edge > 0 else "#ef9a9a"
-                    verdict   = "✅ VALUE" if q_edge > 0 else "❌ NO EDGE"
-                    st.markdown(
-                        f"<span style='color:{edge_col}; font-weight:700'>{verdict}</span> &nbsp;"
-                        f"Edge: <b style='color:{edge_col}'>{q_edge:+.2f}%</b> &nbsp;·&nbsp; "
-                        f"DG: {a['prob']:.1f}% vs Book: {q_implied:.1f}%",
-                        unsafe_allow_html=True
-                    )
+                if st.session_state.get(f"al_form_{i}"):
+                    with st.container():
+                        fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 1])
+                        with fc1:
+                            q_book = st.selectbox("Book", BOOKS, key=f"al_bk_{i}")
+                        with fc2:
+                            q_odds = st.number_input("Odds (American)", value=0, step=5,
+                                                     key=f"al_od_{i}",
+                                                     help="e.g. -150 or +320")
+                        with fc3:
+                            ks_def  = (a["kelly"] if (a["kelly"] and a["kelly"] > 0)
+                                       else float(st.session_state.get("default_stake", 10)))
+                            q_stake = st.number_input("Stake $", value=float(ks_def),
+                                                      step=5.0, key=f"al_st_{i}")
+                        with fc4:
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            log_btn = st.button("✅ Log", key=f"al_log_{i}")
 
-                if log_btn:
-                    if q_odds != 0:
-                        q_implied = american_to_implied(q_odds) or 0
-                        ok = quick_log_bet(
-                            player=a["player"], market=a["market"],
-                            book=q_book, odds=q_odds,
-                            edge=round(a["prob"] - q_implied, 2),
-                            stake=q_stake, event=current_event,
-                            notes=f"Live alert · DG {a['prob']:.1f}% {a['market']}"
-                        )
-                        if ok:
-                            st.success(f"✅ Logged: {a['player']} {a['market']} @ {'+' if q_odds > 0 else ''}{q_odds}")
-                            st.session_state[f"al_form_{i}"] = False
-                            st.cache_data.clear()
-                        else:
-                            st.error("Failed to log")
-                    else:
-                        st.warning("Enter the odds first")
+                        if q_odds != 0:
+                            q_implied = american_to_implied(q_odds) or 0
+                            q_edge    = round(a["prob"] - q_implied, 2)
+                            q_kelly   = _kelly_stake(a["prob"], q_odds, bankroll)
+                            e_color   = "#69f0ae" if q_edge > 0 else "#ef9a9a"
+                            verdict   = "✅ VALUE" if q_edge > 0 else "❌ NO EDGE"
+                            ks_note   = (f" · ½-Kelly: ${q_kelly:.0f}"
+                                         if (q_kelly and q_kelly > 0) else "")
+                            st.markdown(
+                                f"<span style='color:{e_color}; font-weight:700'>{verdict}</span>"
+                                f" &nbsp; Edge: <b style='color:{e_color}'>{q_edge:+.2f}%</b>"
+                                f" &nbsp;·&nbsp; DG: {a['prob']:.1f}% vs Book: {q_implied:.1f}%"
+                                f"<span style='color:#ffcc02'>{ks_note}</span>",
+                                unsafe_allow_html=True,
+                            )
+
+                        if log_btn:
+                            if q_odds != 0:
+                                q_implied = american_to_implied(q_odds) or 0
+                                ok = quick_log_bet(
+                                    player=a["player"], market=a["market"],
+                                    book=q_book, odds=q_odds,
+                                    edge=round(a["prob"] - q_implied, 2),
+                                    stake=q_stake, event=current_event,
+                                    notes=(f"Live alert · DG {a['prob']:.1f}% {a['market']} · "
+                                           f"Score {a['score']}/100 · Calib×{a['calib_ratio']:.2f}"),
+                                )
+                                if ok:
+                                    st.success(f"✅ Logged: {a['player']} {a['market']} "
+                                               f"@ {'+' if q_odds > 0 else ''}{q_odds}")
+                                    st.session_state[f"al_form_{i}"] = False
+                                    st.cache_data.clear()
+                                else:
+                                    st.error("Failed to log bet")
+                            else:
+                                st.warning("Enter the odds from your book first")
+
+    st.markdown("---")
+
+    # ─ Model Calibration ─────────────────────────────────────────────────────────
+    with st.expander("📊 Model Calibration — Predicted vs. Actual Hit Rate", expanded=False):
+        if len(settled) < 3:
+            st.info("Need at least 3 settled bets to compute calibration. "
+                    "Bets logged from this tab automatically record DG probability.")
+        elif not calibration:
+            st.info("Calibration data populates as bets settle. "
+                    "Make sure bets have edge_at_bet and implied_prob recorded.")
+        else:
+            st.caption(
+                "Compares DG model's predicted probability to the actual % of logged bets "
+                "that won. A well-calibrated model has Actual ≈ Predicted. "
+                "Ratio >1.0x means the model underestimates players at that range — "
+                "alerts in that bucket get a confidence boost. Ratio <1.0x means scale back."
+            )
+            calib_rows = []
+            for lb in _LE_BUCKET_ORDER:
+                if lb not in calibration:
+                    continue
+                c    = calibration[lb]
+                diff = c["diff"]
+                if abs(diff) < 3:   stat = "✅ On target"
+                elif diff > 0:      stat = f"🔺 Underestimates (+{diff:.0f}pp)"
+                else:               stat = f"🔻 Overestimates ({diff:.0f}pp)"
+                calib_rows.append({
+                    "Prob Range":   lb,
+                    "DG Predicted": f"{c['predicted']:.1f}%",
+                    "Actual Hit":   f"{c['actual']:.1f}%",
+                    "Δ":            f"{diff:+.1f}pp",
+                    "Ratio (A/P)":  f"{c['ratio']:.2f}x",
+                    "Bets":         c["n"],
+                    "Status":       stat,
+                })
+
+            def _col_calib(val):
+                if "target"       in str(val): return "color:#69f0ae"
+                if "Underestimates" in str(val): return "color:#a5d6a7"
+                if "Overestimates"  in str(val): return "color:#ef9a9a"
+                return ""
+
+            st.dataframe(
+                pd.DataFrame(calib_rows).style.map(_col_calib, subset=["Status"]),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ─ Market Health ──────────────────────────────────────────────────────────────
+    with st.expander("📈 Market Health — ROI & Adaptive Thresholds", expanded=False):
+        if len(settled) < 3:
+            st.info("Need at least 3 settled bets to compute market health.")
+        else:
+            st.caption(
+                "Adaptive thresholds tighten (+pp) when ROI < 0 and loosen (−pp) when "
+                "ROI > 10%. Requires 5+ settled bets per market to activate."
+            )
+            AT_STAT_LABELS = {
+                "good": "✅ Calibrated", "loose": "🟢 Loosened",
+                "watch": "🟡 Watching",  "tight": "🔴 Tightened", "neutral": "⚪ Base",
+            }
+            mkt_rows = []
+            for mkt, md in sorted(mkt_roi.items(), key=lambda x: -x[1]["roi"]):
+                ad    = adaptive.get(mkt, {})
+                base  = _BASE_THRESHOLDS.get(mkt)
+                curr  = ad.get("threshold", base)
+                delta = ad.get("delta", 0)
+                stat  = AT_STAT_LABELS.get(ad.get("status", "neutral"), "⚪ Base")
+                mkt_rows.append({
+                    "Market":      mkt,
+                    "Settled":     md["n"],
+                    "Win Rate":    f"{md['win_rate']:.1f}%",
+                    "P&L":         f"${md['pl']:+.2f}",
+                    "ROI":         md["roi"],
+                    "Base Thresh": f"{base:.0f}%" if base else "—",
+                    "Adaptive":    f"{curr:.0f}%" if curr else "—",
+                    "Δ":           (f"{'+' if delta > 0 else ''}{delta:.0f}pp"
+                                    if delta else "—"),
+                    "Status":      stat,
+                })
+
+            def _col_roi(val):
+                if isinstance(val, (int, float)):
+                    if val > 5:  return "color:#69f0ae; font-weight:600"
+                    if val > 0:  return "color:#a5d6a7"
+                    return "color:#ef9a9a"
+                return ""
+
+            def _col_mstat(val):
+                if "Calibrated" in str(val): return "color:#69f0ae"
+                if "Loosened"   in str(val): return "color:#a5d6a7"
+                if "Watching"   in str(val): return "color:#ffcc02"
+                if "Tightened"  in str(val): return "color:#ef9a9a"
+                return "color:#90a4ae"
+
+            st.dataframe(
+                pd.DataFrame(mkt_rows).style
+                    .map(_col_roi,   subset=["ROI"])
+                    .map(_col_mstat, subset=["Status"])
+                    .format({"ROI": "{:+.1f}%"}),
+                use_container_width=True, hide_index=True,
+            )
 
 
 # ── Tab routing ──────────────────────────────────────────────────────────────────
