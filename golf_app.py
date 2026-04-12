@@ -759,8 +759,8 @@ def _render_finish_odds():
     if sharp_plays2:
         st.markdown('<div class="section-header">🎯 Sharp Plays — Click to Log</div>', unsafe_allow_html=True)
         for i, play in enumerate(sharp_plays2):
-            edge    = play.get("Edge%", 0)
-            sv      = play.get("Sharp Value","")
+            edge    = play.get(edge_col, 0)
+            sv      = play.get(signal_col, "")
             player  = play.get("Player","")
             best    = play.get("Best Odds","—")
             book    = play.get("Best Book","")
@@ -804,10 +804,11 @@ def _render_finish_odds():
                     else:
                         st.warning("No odds to log")
 
-    pos = (df2["Edge%"] > 2).sum()
+    pos = (df2[edge_col] > 2).sum()
+    label = "model signals" if round_in_progress else "positive edges"
     st.markdown(f"""<div class="info-box">
-        Market: <b>{market_sel}</b> · {len(df2)} players shown · 
-        <span style="color:#69f0ae">{pos} positive edges &gt;2%</span>
+        Market: <b>{market_sel}</b> · {len(df2)} players shown ·
+        <span style="color:#69f0ae">{pos} {label} &gt;2%</span>
     </div>""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
