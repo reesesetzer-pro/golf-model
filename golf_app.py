@@ -322,6 +322,8 @@ SHARP_THRESHOLDS = {
     "matchup":  2.0,
 }
 
+PRED_LABELS = {"🔥🔥 STRONG": "📈 HIGH", "🔥 SHARP": "📊 MED", "✅ VALUE": "📉 LOW"}
+
 def sharp_value(dg_prob_pct, book_odds, market="win"):
     """Returns (edge%, label) using market-specific thresholds."""
     e = edge_pct(dg_prob_pct, book_odds)
@@ -369,6 +371,13 @@ skill_by_id  = {int(p["dg_id"]): p for p in skill if p.get("dg_id")}
 field_ids    = {int(p["dg_id"]) for p in field if p.get("dg_id")}
 pred_by_id   = {int(p["dg_id"]): p for p in preds if p.get("dg_id")}
 fo_index     = {(int(fo["dg_id"]), fo["market"]): fo for fo in fin_odds if fo.get("dg_id")}
+
+# Detect if a round is actively in progress
+round_in_progress = any(
+    (p.get("thru") or 0) > 0
+    for p in live_preds
+    if p.get("dg_id")
+)
 
 # Current event
 current_event = "Current Event"
@@ -670,26 +679,38 @@ def _render_finish_odds():
     dk_key   = f"{mk}_dk" if mk != "t20" and mk != "c" else None
     fd_key   = f"{mk}_fd" if mk != "t20" and mk != "c" else None
 
+    if round_in_progress:
+        st.markdown("""<div class="info-box">
+            📊 <b>Round in progress</b> — book lines may be suspended during play.
+            Values shown are <b>model predictions</b> (DG probability vs. last available price),
+            not live actionable edges.
+        </div>""", unsafe_allow_html=True)
+
+    signal_col = "Model Signal" if round_in_progress else "Sharp Value"
+    edge_col   = "Model%" if round_in_progress else "Edge%"
+
     rows2 = []
     for p in field_players:
         prob  = p.get(prob_key)
         best  = p.get(best_key)
-        # For win market, suppress edge if prob is stale baseline
+        # For win market, suppress if player hasn't started (stale baseline)
         if mk == "w" and not p.get("w_prob_is_live"):
             e = 0.0
             sv_edge, sv = None, None
         else:
             e     = edge_pct(prob, best)
             sv_edge, sv = sharp_value(prob, best, mk_threshold)
+        if round_in_progress and sv:
+            sv = PRED_LABELS.get(sv, sv)
         sv_display = f"{sv} +{sv_edge:.2f}%" if sv and sv_edge else (sv or "—")
         row = {
-            "Player":      p["name"],
-            "DG Rank":     p["dg_rank"] or "NR",
-            "DG Prob%":    round((prob or 0), 2),
-            "Best Odds":   fmt_odds(best),
-            "Best Book":   (p.get(bk_key) or "").title(),
-            "Edge%":       round(e, 2) if e is not None else 0.0,
-            "Sharp Value": sv_display,
+            "Player":    p["name"],
+            "DG Rank":   p["dg_rank"] or "NR",
+            "DG Prob%":  round((prob or 0), 2),
+            "Best Odds": fmt_odds(best),
+            "Best Book": (p.get(bk_key) or "").title(),
+            edge_col:    round(e, 2) if e is not None else 0.0,
+            signal_col:  sv_display,
         }
         if dk_key:
             row["DraftKings"] = fmt_odds(p.get(dk_key))
@@ -703,10 +724,10 @@ def _render_finish_odds():
             row["Hard Rock"]= fmt_odds(p.get("w_hr"))
         rows2.append(row)
 
-    df2 = pd.DataFrame(rows2).sort_values("Edge%", ascending=False)
+    df2 = pd.DataFrame(rows2).sort_values(edge_col, ascending=False)
 
-    min_e2 = st.slider("Min Edge%", -15.0, 15.0, -15.0, 0.5, label_visibility="collapsed")
-    df2 = df2[df2["Edge%"] >= min_e2]
+    min_e2 = st.slider("Min%", -15.0, 15.0, -15.0, 0.5, label_visibility="collapsed")
+    df2 = df2[df2[edge_col] >= min_e2]
 
     def color_edge2(val):
         if isinstance(val, (int, float)):
@@ -718,20 +739,23 @@ def _render_finish_odds():
 
     def color_sharp2(val):
         if isinstance(val, str):
-            if "STRONG" in val: return "background-color:#1a3a1a; color:#69f0ae; font-weight:700"
-            if "SHARP"  in val: return "background-color:#1e3320; color:#a5d6a7; font-weight:600"
-            if "VALUE"  in val: return "background-color:#1b2e1b; color:#81c784"
+            if "STRONG" in val or "HIGH" in val: return "background-color:#1a3a1a; color:#69f0ae; font-weight:700"
+            if "SHARP"  in val or "MED"  in val: return "background-color:#1e3320; color:#a5d6a7; font-weight:600"
+            if "VALUE"  in val or "LOW"  in val: return "background-color:#1b2e1b; color:#81c784"
         return ""
 
-    fmt_cols = {"DG Prob%": "{:.2f}%", "Edge%": "{:+.2f}%"}
+    fmt_cols = {"DG Prob%": "{:.2f}%", edge_col: "{:+.2f}%"}
     styled2 = df2.style\
-        .map(color_edge2, subset=["Edge%"])\
-        .map(color_sharp2, subset=["Sharp Value"])\
+        .map(color_edge2, subset=[edge_col])\
+        .map(color_sharp2, subset=[signal_col])\
         .format(fmt_cols, na_rep="—")
     st.dataframe(styled2, use_container_width=True, hide_index=True, height=400)
 
-    # ── One-click Take It for sharp plays ──────────────────────
-    sharp_plays2 = [r for r in df2.to_dict("records") if r.get("Sharp Value") and "—" not in str(r.get("Sharp Value",""))]
+    # ── One-click Take It (only when not in live round) ──────────
+    sharp_plays2 = [] if round_in_progress else [
+        r for r in df2.to_dict("records")
+        if r.get(signal_col) and "—" not in str(r.get(signal_col, ""))
+    ]
     if sharp_plays2:
         st.markdown('<div class="section-header">🎯 Sharp Plays — Click to Log</div>', unsafe_allow_html=True)
         for i, play in enumerate(sharp_plays2):
@@ -1928,8 +1952,13 @@ def _render_best_plays_by_book():
                     # Skip non-win per-book breakdown (not stored per book)
                     continue
                 if not odds: continue
+                # Win market: skip players who haven't started (stale baseline)
+                if mk == "w" and not p.get("w_prob_is_live"):
+                    continue
                 e, sv = sharp_value(prob, odds, mk_threshold)
                 if e is None or e < MIN_EDGE: continue
+                if round_in_progress and sv:
+                    sv = PRED_LABELS.get(sv, sv)
                 sv_display = f"{sv} +{e:.2f}%" if sv else f"+{e:.2f}%"
                 book_plays[book_name].append({
                     "tier":    sv.split(" +")[0] if sv else "—",
