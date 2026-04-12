@@ -666,7 +666,7 @@ def _render_tournament_forecast():
 def _render_finish_odds():
     st.markdown('<div class="section-header">Finish Position Odds — Best Available Across All Books</div>', unsafe_allow_html=True)
 
-    market_sel = st.radio("Market", ["Win", "Top 5", "Top 10"],
+    market_sel = st.radio("Market", ["Win", "Top 5", "Top 10", "Top 20"],
                           horizontal=True, label_visibility="collapsed")
 
     market_key_map = {"Win":"win","Top 5":"top_5","Top 10":"top_10","Top 20":"top_20","Make Cut":"make_cut"}
@@ -1907,6 +1907,7 @@ def _render_best_plays_by_book():
         ("Win",      "w",   "win"),
         ("Top 5",    "t5",  "top_5"),
         ("Top 10",   "t10", "top_10"),
+        ("Top 20",   "t20", "top_20"),
     ]
 
     # Map book label → finish_odds field key
