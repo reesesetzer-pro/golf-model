@@ -435,14 +435,22 @@ for p in [x for x in field if not x.get("withdrawn")]:
     c_prob   = pred_pct(pr.get("baseline_make_cut"))
     cw_prob  = pred_pct(pr.get("course_win"))
 
-    # Override win prob with live prediction if available and player has teed off
+    # Override probs with live predictions once a player has teed off
     lp = live_pred_by_id.get(did, {})
-    live_win_raw = lp.get("win_prob")
     live_thru = lp.get("thru") or 0
     has_started = live_thru > 0
-    live_win = american_to_implied(live_win_raw) if (live_win_raw and has_started) else None
+    current_pos = lp.get("current_pos") or 999
+
+    live_win  = american_to_implied(lp.get("win_prob"))  if (lp.get("win_prob")  and has_started) else None
+    live_t5   = american_to_implied(lp.get("top5_prob")) if (lp.get("top5_prob") and has_started) else None
+    live_t10  = american_to_implied(lp.get("top10_prob"))if (lp.get("top10_prob")and has_started) else None
+
     # Once a player has teed off, never fall back to pre-tournament baseline
-    w_prob_display = live_win if has_started else w_prob
+    w_prob_display  = live_win  if has_started else w_prob
+    t5_prob_display = live_t5   if has_started else t5_prob
+    t10_prob_display= live_t10  if has_started else t10_prob
+    # Top 20: no live prob from DG — suppress if player is clearly out of contention
+    t20_prob_display = None if (has_started and current_pos > 30) else t20_prob
     w_prob_is_live = has_started
 
     # Best book odds
@@ -458,15 +466,15 @@ for p in [x for x in field if not x.get("withdrawn")]:
         "sg_total": sk.get("sg_total"), "sg_ott": sk.get("sg_ott"),
         "sg_app":   sk.get("sg_app"),   "sg_atg": sk.get("sg_atg"),
         "sg_putt":  sk.get("sg_putt"),
-        "bl_win":   w_prob_display, "bl_top5":  t5_prob,
-        "bl_top10": t10_prob, "bl_cut":   c_prob,
+        "bl_win":   w_prob_display,   "bl_top5":  t5_prob_display,
+        "bl_top10": t10_prob_display, "bl_cut":   c_prob,
         "co_win":   cw_prob,
         # _p keys used by finish odds tab (prob_key = f"{mk}_p")
-        "w_p":      w_prob_display,
-        "t5_p":     t5_prob,
-        "t10_p":    t10_prob,
-        "t20_p":    t20_prob,
-        "c_p":      c_prob,
+        "w_p":   w_prob_display,
+        "t5_p":  t5_prob_display,
+        "t10_p": t10_prob_display,
+        "t20_p": t20_prob_display,
+        "c_p":   c_prob,
         # win odds
         "w_prob_is_live": w_prob_is_live,
         "w_dg_p": w_prob_display,    "w_dg":  fo_w.get("dg_odds"),
