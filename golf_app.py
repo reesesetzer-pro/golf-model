@@ -270,7 +270,15 @@ def load_data():
     field      = sb.table("field").select("*").execute().data
     preds      = sb.table("predictions").select("*").execute().data
     live_preds = sb.table("live_predictions").select("*").execute().data
-    fin_odds   = sb.table("finish_odds").select("*").execute().data
+    fin_odds_raw = sb.table("finish_odds").select("*").order("updated_at", desc=True).execute().data
+    # Deduplicate by (dg_id, market) — keep most recently updated row per player+market
+    _seen = set()
+    fin_odds = []
+    for r in fin_odds_raw:
+        key = (r.get("dg_id"), r.get("market"))
+        if key not in _seen:
+            _seen.add(key)
+            fin_odds.append(r)
     matchups   = sb.table("matchup_odds").select("*").order("p1_dg_win_prob", desc=True).execute().data
     rounds     = sb.table("rounds").select("*").order("year", desc=True).limit(25000).execute().data
     schedule   = sb.table("schedule").select("*").order("start_date", desc=True).execute().data
