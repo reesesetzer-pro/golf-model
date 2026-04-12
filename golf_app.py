@@ -422,9 +422,11 @@ for p in [x for x in field if not x.get("withdrawn")]:
     lp = live_pred_by_id.get(did, {})
     live_win_raw = lp.get("win_prob")
     live_thru = lp.get("thru") or 0
-    live_win = american_to_implied(live_win_raw) if (live_win_raw and live_thru > 0) else None
-    w_prob_display = live_win if live_win else w_prob
-    w_prob_is_live = live_win is not None
+    has_started = live_thru > 0
+    live_win = american_to_implied(live_win_raw) if (live_win_raw and has_started) else None
+    # Once a player has teed off, never fall back to pre-tournament baseline
+    w_prob_display = live_win if has_started else w_prob
+    w_prob_is_live = has_started
 
     # Best book odds
     w_best_odds  = implied_from_best(fo_w)
