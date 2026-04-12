@@ -552,11 +552,12 @@ with c4:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────────
-tab_forecast, tab_edges, tab_h2h, tab_live, tab_tracker, tab_research = st.tabs([
+tab_forecast, tab_edges, tab_h2h, tab_live, tab_alerts, tab_tracker, tab_research = st.tabs([
     "📊 Forecast",
     "💰 Edges",
     "⚔️ H2H",
     "🔴 Live",
+    "🚨 Alerts",
     "📝 Tracker",
     "🏌️ Research",
 ])
@@ -1198,101 +1199,9 @@ def _render_leaderboard():
             🟢 Green = model upgrading player · 🔴 Red = model downgrading
         </div>""", unsafe_allow_html=True)
 
-        # ── Live Model Alerts ─────────────────────────────────────
-        st.markdown('<div class="section-header">🚨 Live Model Alerts — Take These Now</div>', unsafe_allow_html=True)
-
-        def breakeven_odds(prob_pct):
-            """Convert probability % to American odds (the minimum price for value)."""
-            if not prob_pct or prob_pct <= 0: return None
-            p = prob_pct / 100
-            if p >= 0.5:
-                return int(round(-(p / (1 - p)) * 100))
-            else:
-                return int(round(((1 - p) / p) * 100))
-
-        ALERT_MARKETS = [
-            ("Win",    "win_prob",   "Win",   20.0),
-            ("Top 5",  "top5_prob",  "Top 5", 40.0),
-            ("Top 10", "top10_prob", "Top 10",55.0),
-        ]
-
-        alerts = []
-        for p in live:
-            pos   = p.get("current_pos") or 999
-            thru  = p.get("thru") or 0
-            if thru == 0: continue  # hasn't started
-            for mkt_label, prob_field, _, threshold in ALERT_MARKETS:
-                prob = american_to_implied(p.get(prob_field)) or 0
-                if prob < threshold: continue
-                be_odds = breakeven_odds(prob)
-                be_str  = f"+{be_odds}" if be_odds and be_odds > 0 else str(be_odds)
-                alerts.append({
-                    "player": p.get("player_name",""),
-                    "pos":    pos,
-                    "market": mkt_label,
-                    "prob":   prob,
-                    "be_odds":be_str,
-                    "prob_field": prob_field,
-                })
-
-        alerts.sort(key=lambda x: -x["prob"])
-
-        if alerts:
-            for i, a in enumerate(alerts[:12]):
-                border = "#69f0ae" if a["prob"] >= 65 else ("#a5d6a7" if a["prob"] >= 50 else "#81c784")
-                col_info, col_btn = st.columns([5, 1])
-                with col_info:
-                    st.markdown(f"""
-                    <div style="border-left:4px solid {border}; padding:10px 14px; margin:4px 0;
-                                background:#1a1a1a; border-radius:4px;">
-                        <span style="color:{border}; font-weight:700; font-size:1rem">
-                            🎯 Take {a['player']} {a['market']}
-                        </span>
-                        <span style="color:#888; margin-left:8px">· T{a['pos']}</span>
-                        <br>
-                        <span style="color:#90a4ae; font-size:0.85rem">
-                            DG Model: <b style="color:{border}">{a['prob']:.1f}%</b> ·
-                            Any odds better than <b style="color:#fff">{a['be_odds']}</b> is value
-                        </span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col_btn:
-                    if st.button("📝 Log", key=f"lb_log_{i}"):
-                        st.session_state[f"lb_quick_{i}"] = True
-
-                if st.session_state.get(f"lb_quick_{i}"):
-                    with st.expander(f"Log {a['player']} {a['market']}", expanded=True):
-                        qc1, qc2, qc3 = st.columns(3)
-                        with qc1:
-                            q_book = st.selectbox("Book", ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","theScore","Hard Rock"], key=f"qb_{i}")
-                        with qc2:
-                            q_odds = st.number_input("Your Odds", value=0, step=5, key=f"qo_{i}",
-                                                     help="Enter American odds (e.g. -110 or +350)")
-                        with qc3:
-                            q_stake = st.number_input("Stake $", value=float(st.session_state.get("default_stake",10)), step=5.0, key=f"qs_{i}")
-                        if q_odds != 0:
-                            q_edge = round(a["prob"] - (american_to_implied(q_odds) or 0), 2)
-                            edge_color = "#69f0ae" if q_edge > 0 else "#ef9a9a"
-                            st.markdown(f"**Edge: <span style='color:{edge_color}'>{q_edge:+.2f}%</span>** vs DG {a['prob']:.1f}%", unsafe_allow_html=True)
-                        if st.button("✅ Log Bet", key=f"qlb_{i}"):
-                            if q_odds != 0:
-                                ok = quick_log_bet(
-                                    player=a["player"], market=a["market"],
-                                    book=q_book, odds=q_odds,
-                                    edge=round(a["prob"] - (american_to_implied(q_odds) or 0), 2),
-                                    stake=q_stake, event=current_event,
-                                    notes=f"Live alert — DG {a['prob']:.1f}% {a['market']}"
-                                )
-                                if ok:
-                                    st.success("✅ Logged!")
-                                    st.session_state[f"lb_quick_{i}"] = False
-                                    st.cache_data.clear()
-                            else:
-                                st.warning("Enter odds first")
-        else:
-            st.markdown("""<div class="info-box">
-                No players currently above alert thresholds (Win &gt;20%, Top 5 &gt;40%, Top 10 &gt;55%).
-            </div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="info-box">
+            🚨 Live bet alerts → see the <b>Alerts</b> tab
+        </div>""", unsafe_allow_html=True)
     else:
         st.markdown("""<div class="info-box">
             ⏳ Live leaderboard populates once Round 1 begins Thursday morning.<br>
@@ -2157,6 +2066,139 @@ def _render_best_plays_by_book():
         </div>""", unsafe_allow_html=True)
 
 
+# ════════════════════════════════════════════════════════════
+# VIEW: LIVE ALERTS
+# ════════════════════════════════════════════════════════════
+def _render_live_alerts():
+    st.markdown('<div class="section-header">🚨 Live Model Alerts — Take These Now</div>', unsafe_allow_html=True)
+
+    @st.cache_data(ttl=60)
+    def load_alert_data():
+        sb = get_supabase()
+        return sb.table("live_predictions").select("*").order("current_pos").execute().data
+
+    live = load_alert_data()
+
+    if not live or not any(p.get("thru", 0) for p in live):
+        st.markdown("""<div class="info-box">
+            ⏳ Alerts populate once the round begins — live DataGolf probabilities needed.
+        </div>""", unsafe_allow_html=True)
+        return
+
+    def breakeven_odds(prob_pct):
+        if not prob_pct or prob_pct <= 0: return None
+        p = prob_pct / 100
+        if p >= 0.5:
+            return int(round(-(p / (1 - p)) * 100))
+        else:
+            return int(round(((1 - p) / p) * 100))
+
+    ALERT_MARKETS = [
+        ("Win",    "win_prob",    20.0),
+        ("Top 5",  "top5_prob",   40.0),
+        ("Top 10", "top10_prob",  55.0),
+    ]
+
+    alerts = []
+    for p in live:
+        if not (p.get("thru") or 0): continue
+        pos = p.get("current_pos") or 999
+        for mkt_label, prob_field, threshold in ALERT_MARKETS:
+            prob = american_to_implied(p.get(prob_field)) or 0
+            if prob < threshold: continue
+            be  = breakeven_odds(prob)
+            alerts.append({
+                "player": p.get("player_name", ""),
+                "pos":    pos,
+                "market": mkt_label,
+                "prob":   prob,
+                "be_odds": f"+{be}" if be and be > 0 else str(be),
+                "be_val":  be,
+            })
+
+    alerts.sort(key=lambda x: -x["prob"])
+
+    if not alerts:
+        st.markdown("""<div class="info-box">
+            No players above thresholds right now (Win &gt;20% · Top 5 &gt;40% · Top 10 &gt;55%).
+            Check back as the round progresses.
+        </div>""", unsafe_allow_html=True)
+        return
+
+    st.markdown(f"""<div class="info-box">
+        {len(alerts)} live signal{'s' if len(alerts) != 1 else ''} ·
+        Enter the odds you see on your book — edge calculates instantly
+    </div>""", unsafe_allow_html=True)
+
+    BOOKS = ["DraftKings","FanDuel","BetMGM","Caesars","Bet365","theScore","Hard Rock"]
+
+    for i, a in enumerate(alerts):
+        border = "#69f0ae" if a["prob"] >= 65 else ("#a5d6a7" if a["prob"] >= 50 else "#81c784")
+        col_card, col_btn = st.columns([5, 1])
+        with col_card:
+            st.markdown(f"""
+            <div style="border-left:4px solid {border}; padding:12px 16px; margin:6px 0;
+                        background:#1a1a1a; border-radius:4px;">
+                <div style="font-size:1.05rem; font-weight:700; color:{border}">
+                    🎯 {a['player']} — {a['market']}
+                    <span style="color:#888; font-weight:400; font-size:0.85rem; margin-left:8px">T{a['pos']}</span>
+                </div>
+                <div style="color:#90a4ae; font-size:0.88rem; margin-top:4px">
+                    DG Model: <b style="color:{border}">{a['prob']:.1f}%</b> &nbsp;·&nbsp;
+                    Take any odds better than <b style="color:#fff; font-size:0.95rem">{a['be_odds']}</b>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_btn:
+            if st.button("📝 Log", key=f"al_open_{i}"):
+                st.session_state[f"al_form_{i}"] = not st.session_state.get(f"al_form_{i}", False)
+
+        if st.session_state.get(f"al_form_{i}"):
+            with st.container():
+                fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 1])
+                with fc1:
+                    q_book  = st.selectbox("Book", BOOKS, key=f"al_bk_{i}")
+                with fc2:
+                    q_odds  = st.number_input("Odds", value=0, step=5, key=f"al_od_{i}",
+                                              help="American odds — e.g. -150 or +320")
+                with fc3:
+                    q_stake = st.number_input("Stake $", value=float(st.session_state.get("default_stake", 10)), step=5.0, key=f"al_st_{i}")
+                with fc4:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    log_btn = st.button("✅ Log", key=f"al_log_{i}")
+
+                if q_odds != 0:
+                    q_implied = american_to_implied(q_odds) or 0
+                    q_edge    = round(a["prob"] - q_implied, 2)
+                    edge_col  = "#69f0ae" if q_edge > 0 else "#ef9a9a"
+                    verdict   = "✅ VALUE" if q_edge > 0 else "❌ NO EDGE"
+                    st.markdown(
+                        f"<span style='color:{edge_col}; font-weight:700'>{verdict}</span> &nbsp;"
+                        f"Edge: <b style='color:{edge_col}'>{q_edge:+.2f}%</b> &nbsp;·&nbsp; "
+                        f"DG: {a['prob']:.1f}% vs Book: {q_implied:.1f}%",
+                        unsafe_allow_html=True
+                    )
+
+                if log_btn:
+                    if q_odds != 0:
+                        q_implied = american_to_implied(q_odds) or 0
+                        ok = quick_log_bet(
+                            player=a["player"], market=a["market"],
+                            book=q_book, odds=q_odds,
+                            edge=round(a["prob"] - q_implied, 2),
+                            stake=q_stake, event=current_event,
+                            notes=f"Live alert · DG {a['prob']:.1f}% {a['market']}"
+                        )
+                        if ok:
+                            st.success(f"✅ Logged: {a['player']} {a['market']} @ {'+' if q_odds > 0 else ''}{q_odds}")
+                            st.session_state[f"al_form_{i}"] = False
+                            st.cache_data.clear()
+                        else:
+                            st.error("Failed to log")
+                    else:
+                        st.warning("Enter the odds first")
+
+
 # ── Tab routing ──────────────────────────────────────────────────────────────────
 with tab_forecast:
     _fv = st.radio("", ["📊 Tournament Forecast", "📈 Skill Ratings"],
@@ -2189,6 +2231,9 @@ with tab_live:
         _render_leaderboard()
     else:
         _render_live_matchups()
+
+with tab_alerts:
+    _render_live_alerts()
 
 with tab_tracker:
     _tv = st.radio("", ["📝 Results Tracker", "⚙️ Auto Scheduler"],
