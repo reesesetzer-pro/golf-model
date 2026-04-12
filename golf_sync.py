@@ -829,6 +829,10 @@ def sync_odds_api_to_finish_odds():
     book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
     now = now_utc()
 
+    # Build name → dg_id lookup from skill_ratings
+    sr = supabase.table("skill_ratings").select("dg_id,player_name").execute().data or []
+    name_to_dgid = {r["player_name"].lower(): r["dg_id"] for r in sr if r.get("player_name") and r.get("dg_id")}
+
     active_sports = discover_active_golf_sports()
     markets_found = []
     markets_empty = []
@@ -865,10 +869,16 @@ def sync_odds_api_to_finish_odds():
 
             # Build rows for finish_odds upsert
             rows = []
+            skipped = []
             for player_name, odds in player_odds.items():
+                dg_id = name_to_dgid.get(player_name.lower())
+                if not dg_id:
+                    skipped.append(player_name)
+                    continue
                 best_book = max(odds, key=lambda k: odds[k]) if odds else None
                 best_odds = odds[best_book] if best_book else None
                 row = {
+                    "dg_id":       dg_id,
                     "event_id":    "current",
                     "market":      market,
                     "player_name": player_name,
@@ -880,6 +890,8 @@ def sync_odds_api_to_finish_odds():
                 for col in book_cols:
                     row[col] = odds.get(col)
                 rows.append(row)
+            if skipped:
+                log.warning(f"  finish_odds ({market}): skipped {len(skipped)} players with no dg_id match: {skipped[:5]}")
 
             if rows:
                 # Upsert by player_name + market (no dg_id available from Odds API)
