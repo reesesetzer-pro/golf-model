@@ -365,7 +365,137 @@ create table if not exists bets (
     profit_loss     numeric default 0,
     logged_at       timestamptz default now()
 );
+
+-- Learning engine snapshots (calibration + market ROI over time)
+create table if not exists model_snapshots (
+    id                  bigserial primary key,
+    snapshot_at         timestamptz default now(),
+    event_name          text,
+    total_settled       integer,
+    calibration         jsonb,
+    market_roi          jsonb,
+    adaptive_thresholds jsonb
+);
 """
+
+def sync_model_snapshot(event_name: str = ""):
+    """
+    Compute learning engine state from all settled bets and save a snapshot
+    to model_snapshots. Called automatically at the end of full_sync() and
+    available as a manual trigger.
+
+    DG probability at bet time is reconstructed as implied_prob + edge_at_bet —
+    both fields are written by quick_log_bet() and the manual Tracker form.
+    """
+    log.info("Saving model performance snapshot...")
+
+    bets_raw = supabase.table("bets").select(
+        "implied_prob,edge_at_bet,result,market,stake,profit_loss"
+    ).execute().data or []
+    settled = [b for b in bets_raw if b.get("result") not in ("Pending", None, "Void")]
+
+    if not settled:
+        log.info("No settled bets — skipping snapshot.")
+        return
+
+    BUCKETS = [
+        (0,  25,  "0-25%"),
+        (25, 35,  "25-35%"),
+        (35, 45,  "35-45%"),
+        (45, 55,  "45-55%"),
+        (55, 65,  "55-65%"),
+        (65, 101, "65%+"),
+    ]
+    BASE_T = {"Win": 20.0, "Top 5": 40.0, "Top 10": 55.0}
+
+    # ─ Calibration ──────────────────────────────────────────────────────────
+    cd = {lb: {"psum": 0.0, "wins": 0, "n": 0} for *_, lb in BUCKETS}
+    for b in settled:
+        dg = float(b.get("implied_prob") or 0) + float(b.get("edge_at_bet") or 0)
+        if dg <= 0:
+            continue
+        is_win = b.get("result") == "Win"
+        for lo, hi, lb in BUCKETS:
+            if lo <= dg < hi:
+                cd[lb]["psum"] += dg
+                cd[lb]["wins"] += 1 if is_win else 0
+                cd[lb]["n"]    += 1
+                break
+
+    calibration = {}
+    for lb, s in cd.items():
+        if s["n"] < 2:
+            continue
+        pred   = s["psum"] / s["n"]
+        actual = s["wins"] / s["n"] * 100
+        calibration[lb] = {
+            "predicted": round(pred, 1),
+            "actual":    round(actual, 1),
+            "n":         s["n"],
+            "ratio":     round(actual / pred, 3) if pred else 1.0,
+            "diff":      round(actual - pred, 1),
+        }
+
+    # ─ Market ROI ───────────────────────────────────────────────────────────
+    ms = {}
+    for b in settled:
+        mkt = b.get("market", "Unknown")
+        ms.setdefault(mkt, {"n": 0, "wins": 0, "staked": 0.0, "pl": 0.0})
+        ms[mkt]["n"]      += 1
+        ms[mkt]["wins"]   += 1 if b.get("result") == "Win" else 0
+        ms[mkt]["staked"] += float(b.get("stake") or 0)
+        ms[mkt]["pl"]     += float(b.get("profit_loss") or 0)
+
+    mkt_roi = {}
+    for mkt, s in ms.items():
+        roi = (s["pl"] / s["staked"] * 100) if s["staked"] else 0.0
+        mkt_roi[mkt] = {
+            "n":        s["n"],
+            "roi":      round(roi, 1),
+            "win_rate": round(s["wins"] / s["n"] * 100, 1) if s["n"] else 0.0,
+            "pl":       round(s["pl"], 2),
+        }
+
+    # ─ Adaptive thresholds ──────────────────────────────────────────────────
+    adaptive = {}
+    for mkt, base in BASE_T.items():
+        md = mkt_roi.get(mkt, {})
+        n  = md.get("n", 0)
+        if n < 5:
+            adaptive[mkt] = {"threshold": base, "delta": 0, "status": "neutral"}
+            continue
+        roi = md["roi"]
+        if   roi < -15: delta, status = +10, "tight"
+        elif roi < -5:  delta, status = +5,  "tight"
+        elif roi < 0:   delta, status = +3,  "watch"
+        elif roi > 20:  delta, status = -5,  "loose"
+        elif roi > 10:  delta, status = -2,  "loose"
+        else:           delta, status =  0,  "good"
+        adaptive[mkt] = {
+            "threshold": round(max(5.0, base + delta), 1),
+            "delta":     delta,
+            "status":    status,
+        }
+
+    # ─ Save ─────────────────────────────────────────────────────────────────
+    row = {
+        "snapshot_at":         datetime.now(timezone.utc).isoformat(),
+        "event_name":          event_name or "Manual",
+        "total_settled":       len(settled),
+        "calibration":         calibration,
+        "market_roi":          mkt_roi,
+        "adaptive_thresholds": adaptive,
+    }
+    try:
+        supabase.table("model_snapshots").insert(row).execute()
+        log.info(
+            f"Snapshot saved — {len(settled)} settled bets, "
+            f"{len(calibration)} calibration buckets, "
+            f"markets: {list(mkt_roi.keys())}"
+        )
+    except Exception as e:
+        log.warning(f"Snapshot failed (table may not exist yet — run setup): {e}")
+
 
 def setup_tables():
     """Print SQL to run in Supabase SQL editor to create all tables."""
@@ -969,6 +1099,7 @@ def full_sync():
     sync_historical_odds(year=2026)
     sync_historical_odds(year=2025)
     sync_book_odds()
+    sync_model_snapshot()   # persist calibration + market ROI after all bets settle
     log.info("━━━  FULL SYNC COMPLETE  ━━━")
 
 

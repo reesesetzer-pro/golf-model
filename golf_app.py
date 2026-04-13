@@ -2602,6 +2602,93 @@ def _render_live_alerts():
                 use_container_width=True, hide_index=True,
             )
 
+            # ─ Snapshot history ──────────────────────────────────────────────
+            st.markdown("---")
+            sh1, sh2 = st.columns([5, 1])
+            with sh1:
+                st.markdown("**Performance History** — weekly calibration & ROI over time")
+            with sh2:
+                if st.button("📸 Save Snapshot", key="save_snap"):
+                    try:
+                        sb2 = get_supabase()
+                        sb2.table("model_snapshots").insert({
+                            "snapshot_at":   (datetime.now(timezone.utc)
+                                              - timedelta(hours=4)).isoformat(),
+                            "event_name":    current_event,
+                            "total_settled": len(settled),
+                            "calibration":   calibration,
+                            "market_roi":    mkt_roi,
+                            "adaptive_thresholds": {
+                                k: {"threshold": v.get("threshold"),
+                                    "delta":     v.get("delta", 0),
+                                    "status":    v.get("status", "neutral")}
+                                for k, v in adaptive.items()
+                            },
+                        }).execute()
+                        st.success("Snapshot saved!")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+                        st.code(
+                            "CREATE TABLE IF NOT EXISTS model_snapshots (\n"
+                            "    id bigserial primary key,\n"
+                            "    snapshot_at timestamptz default now(),\n"
+                            "    event_name text,\n"
+                            "    total_settled integer,\n"
+                            "    calibration jsonb,\n"
+                            "    market_roi jsonb,\n"
+                            "    adaptive_thresholds jsonb\n"
+                            ");",
+                            language="sql",
+                        )
+
+            @st.cache_data(ttl=300)
+            def load_snapshots():
+                return (get_supabase()
+                        .table("model_snapshots")
+                        .select("snapshot_at,event_name,total_settled,market_roi,adaptive_thresholds")
+                        .order("snapshot_at", desc=True)
+                        .limit(12)
+                        .execute().data or [])
+
+            snaps = load_snapshots()
+            if snaps:
+                snap_rows = []
+                for s in snaps:
+                    ts   = (s.get("snapshot_at") or "")[:16].replace("T", " ")
+                    mro  = s.get("market_roi") or {}
+                    ath  = s.get("adaptive_thresholds") or {}
+                    snap_rows.append({
+                        "Saved":       ts,
+                        "Event":       s.get("event_name", "—"),
+                        "Settled":     s.get("total_settled", 0),
+                        "Win ROI":     mro.get("Win",    {}).get("roi"),
+                        "Top 5 ROI":   mro.get("Top 5",  {}).get("roi"),
+                        "Top 10 ROI":  mro.get("Top 10", {}).get("roi"),
+                        "Win Thresh":  (f"{ath.get('Win',{}).get('threshold',20):.0f}%"
+                                        if ath.get("Win") else "20%"),
+                    })
+
+                def _col_sroi(val):
+                    if isinstance(val, (int, float)):
+                        if val > 5:  return "color:#69f0ae; font-weight:600"
+                        if val > 0:  return "color:#a5d6a7"
+                        return "color:#ef9a9a"
+                    return ""
+
+                st.dataframe(
+                    pd.DataFrame(snap_rows).style
+                        .map(_col_sroi, subset=["Win ROI", "Top 5 ROI", "Top 10 ROI"])
+                        .format({"Win ROI":    "{:+.1f}%",
+                                 "Top 5 ROI":  "{:+.1f}%",
+                                 "Top 10 ROI": "{:+.1f}%"}, na_rep="—"),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption("Also auto-saved by golf_sync.py --mode full after each tournament.")
+            else:
+                st.caption("No snapshots yet — click Save Snapshot or run a full sync "
+                           "after the tournament settles.")
+
 
 # ── Tab routing ──────────────────────────────────────────────────────────────────
 with tab_forecast:
