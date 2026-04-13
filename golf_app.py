@@ -4,6 +4,7 @@ Deploy to Streamlit Cloud via GitHub (same repo as MLB F5 model)
 Run locally: streamlit run golf_app.py
 """
 
+import re
 import streamlit as st
 import pandas as pd
 from supabase import create_client
@@ -374,11 +375,13 @@ field_ids    = {int(p["dg_id"]) for p in field if p.get("dg_id")}
 pred_by_id   = {int(p["dg_id"]): p for p in preds if p.get("dg_id")}
 fo_index     = {(int(fo["dg_id"]), fo["market"]): fo for fo in fin_odds if fo.get("dg_id")}
 
-# Detect if a round is actively in progress
-round_in_progress = any(
-    (p.get("thru") or 0) > 0
-    for p in live_preds
-    if p.get("dg_id")
+# Detect round / tournament state
+_lp_active      = [p for p in live_preds if p.get("dg_id")]
+_n_finished     = sum(1 for p in _lp_active if (p.get("thru") or 0) >= 18)
+tournament_complete = bool(_lp_active) and (_n_finished >= len(_lp_active) * 0.85)
+round_in_progress   = (
+    not tournament_complete
+    and any((p.get("thru") or 0) > 0 for p in _lp_active)
 )
 
 # Current event
@@ -1264,8 +1267,9 @@ def _render_tracker():
     st.markdown("---")
 
     # ── Sub-tabs ──────────────────────────────────────────────
-    r_tab1, r_tab2, r_tab3, r_tab4 = st.tabs([
-        "➕ Log Bet", "📋 Bet Log", "📊 Learning Analytics", "🎯 Model Recommendations"
+    r_tab1, r_tab2, r_tab3, r_tab4, r_tab5 = st.tabs([
+        "➕ Log Bet", "📋 Bet Log", "📊 Learning Analytics",
+        "🎯 Model Recommendations", "🏌️ Grade H2H",
     ])
 
     # ── LOG BET ───────────────────────────────────────────────
@@ -1649,6 +1653,257 @@ def _render_tracker():
                 No plays above threshold right now, or all edge tiers have negative historical ROI.
                 Check the Finish Odds + Edge and Best H2H Plays tabs for current opportunities.
             </div>""", unsafe_allow_html=True)
+
+    # ── GRADE H2H ─────────────────────────────────────────────
+    with r_tab5:
+        st.markdown('<div class="section-header">🏌️ Grade H2H Results</div>', unsafe_allow_html=True)
+        st.caption("Auto-grades pending H2H bets using final scores from live_predictions. "
+                   "Run a live sync first if scores look stale.")
+
+        @st.cache_data(ttl=60)
+        def load_h2h_scores():
+            return (get_supabase()
+                    .table("live_predictions")
+                    .select("player_name,current_score,thru,current_pos")
+                    .execute().data or [])
+
+        final       = load_h2h_scores()
+        score_map   = {
+            p["player_name"]: {"score": p.get("current_score"),
+                               "thru":  p.get("thru") or 0,
+                               "pos":   p.get("current_pos")}
+            for p in final if p.get("player_name")
+        }
+
+        h2h_pending  = [b for b in pending  if "H2H" in (b.get("market") or "")]
+        h2h_settled  = [b for b in settled  if "H2H" in (b.get("market") or "")]
+        all_h2h      = h2h_pending + h2h_settled
+
+        if not all_h2h:
+            st.info("No H2H bets logged yet. Use the Best H2H Plays tab to find and log plays.")
+        else:
+            # ─ Auto-grade pending ────────────────────────────────────────────────────
+            if h2h_pending:
+                st.markdown(f"**{len(h2h_pending)} pending H2H bet{'s' if len(h2h_pending) != 1 else ''}**")
+
+                grade_rows = []
+                for b in h2h_pending:
+                    notes  = b.get("notes", "")
+                    m      = re.search(r'vs ([^|]+)\|', notes)
+                    opp    = m.group(1).strip() if m else None
+                    player = b.get("player_name", "")
+
+                    p_d    = score_map.get(player, {})
+                    o_d    = score_map.get(opp, {}) if opp else {}
+                    p_sc   = p_d.get("score")
+                    o_sc   = o_d.get("score")
+                    p_thru = p_d.get("thru", 0)
+                    o_thru = o_d.get("thru", 0)
+                    both_done = p_thru >= 18 and o_thru >= 18
+
+                    if p_sc is not None and o_sc is not None:
+                        if p_sc < o_sc:   raw = "Win"
+                        elif p_sc > o_sc: raw = "Loss"
+                        else:             raw = "Push"
+                        proposed   = raw if both_done else raw + "*"
+                        score_disp = f"{p_sc:+d} vs {o_sc:+d}"
+                        data_ok    = True
+                    else:
+                        proposed   = "?"
+                        score_disp = ("Score missing" if p_sc is None and o_sc is None
+                                      else f"{'✓' if p_sc is not None else '?'} vs "
+                                           f"{'✓' if o_sc is not None else '?'}")
+                        data_ok    = False
+
+                    stake  = float(b.get("stake") or 0)
+                    to_win = float(b.get("to_win") or 0)
+                    grade_rows.append({
+                        "id": b["id"], "player": player, "opp": opp or "?",
+                        "score_disp": score_disp, "edge": float(b.get("edge_at_bet") or 0),
+                        "odds": b.get("odds") or 0, "stake": stake, "to_win": to_win,
+                        "proposed": proposed, "data_ok": data_ok,
+                    })
+
+                def _gc(val):
+                    if "Win"  in str(val) and "?" not in str(val): return "color:#69f0ae; font-weight:700"
+                    if "Loss" in str(val): return "color:#ef9a9a; font-weight:700"
+                    if "Push" in str(val): return "color:#ffcc02"
+                    return "color:#90a4ae"
+
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Player":    r["player"],
+                        "vs":        r["opp"],
+                        "Scores":    r["score_disp"],
+                        "Edge%":     r["edge"],
+                        "Odds":      f"{'+' if r['odds'] > 0 else ''}{r['odds']}" if r["odds"] else "—",
+                        "Stake":     f"${r['stake']:.0f}",
+                        "Win P&L":   f"${r['to_win']:+.0f}",
+                        "Loss P&L":  f"-${r['stake']:.0f}",
+                        "Proposed":  r["proposed"],
+                    } for r in grade_rows]).style
+                        .map(_gc, subset=["Proposed"])
+                        .format({"Edge%": "{:+.2f}%"}),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption("* = provisional (one or both players not yet through 18)")
+
+                confirmable = [r for r in grade_rows if r["data_ok"] and r["proposed"] != "?"]
+                if confirmable:
+                    if st.button(f"✅ Confirm {len(confirmable)} Grade{'s' if len(confirmable) != 1 else ''}",
+                                 type="primary", key="h2h_grade_confirm"):
+                        sb5 = get_supabase()
+                        ok_count = 0
+                        for r in confirmable:
+                            result = r["proposed"].replace("*", "")
+                            pl     = (r["to_win"] if result == "Win"
+                                      else -r["stake"] if result == "Loss" else 0.0)
+                            try:
+                                sb5.table("bets").update({
+                                    "result":      result,
+                                    "profit_loss": round(pl, 2),
+                                }).eq("id", r["id"]).execute()
+                                ok_count += 1
+                            except Exception as ge:
+                                st.error(f"Failed #{r['id']}: {ge}")
+                        if ok_count:
+                            st.success(f"✅ Graded {ok_count} H2H bets!")
+                            st.cache_data.clear()
+                            st.rerun()
+                else:
+                    st.warning("Scores not found — run `py golf_sync.py --mode live` to refresh.")
+            else:
+                st.success("All H2H bets are settled. See theme analysis below.")
+
+            st.markdown("---")
+
+            # ─ Theme analysis ────────────────────────────────────────────────────────
+            if len(h2h_settled) < 2:
+                st.info(f"Grade at least 2 H2H bets to see theme analysis "
+                        f"({len(h2h_settled)} settled so far).")
+            else:
+                st.markdown(f"### 🔍 Theme Analysis — {len(h2h_settled)} Settled H2H Bets")
+
+                # Overall summary card
+                tot_wins  = sum(1 for b in h2h_settled if b.get("result") == "Win")
+                tot_pl    = sum(float(b.get("profit_loss") or 0) for b in h2h_settled)
+                tot_stk   = sum(float(b.get("stake") or 0) for b in h2h_settled)
+                tot_roi   = tot_pl / tot_stk * 100 if tot_stk else 0
+                hit_rate  = tot_wins / len(h2h_settled) * 100
+                sc        = "#69f0ae" if tot_pl > 0 else "#ef9a9a"
+                st.markdown(f"""
+                <div style="background:#1a1a1a; border:1px solid {sc}; border-radius:6px;
+                            padding:12px 18px; margin-bottom:12px; display:flex; gap:28px">
+                    <div><div style="color:#90a4ae;font-size:0.75rem">Bets</div>
+                         <div style="color:#fff;font-weight:700;font-size:1.1rem">{len(h2h_settled)}</div></div>
+                    <div><div style="color:#90a4ae;font-size:0.75rem">Hit Rate</div>
+                         <div style="color:{sc};font-weight:700;font-size:1.1rem">{hit_rate:.0f}%</div></div>
+                    <div><div style="color:#90a4ae;font-size:0.75rem">P&L</div>
+                         <div style="color:{sc};font-weight:700;font-size:1.1rem">${tot_pl:+.2f}</div></div>
+                    <div><div style="color:#90a4ae;font-size:0.75rem">ROI</div>
+                         <div style="color:{sc};font-weight:700;font-size:1.1rem">{tot_roi:+.1f}%</div></div>
+                </div>""", unsafe_allow_html=True)
+
+                def _roi_c(val):
+                    if isinstance(val, (int, float)):
+                        return "color:#69f0ae; font-weight:600" if val > 0 else "color:#ef9a9a"
+                    return ""
+
+                th1, th2 = st.columns(2)
+
+                # Edge tier performance
+                with th1:
+                    st.markdown("**By Edge Tier (3%+ plays)**")
+                    tiers = {"3-5%": [], "5-8%": [], "8%+": []}
+                    for b in h2h_settled:
+                        edge = float(b.get("edge_at_bet") or 0)
+                        if edge < 3: continue
+                        bucket = "3-5%" if edge < 5 else ("5-8%" if edge < 8 else "8%+")
+                        tiers[bucket].append(b)
+                    tier_rows = []
+                    for tier, tb in tiers.items():
+                        if not tb: continue
+                        w   = sum(1 for b in tb if b.get("result") == "Win")
+                        pl  = sum(float(b.get("profit_loss") or 0) for b in tb)
+                        stk = sum(float(b.get("stake") or 0) for b in tb)
+                        tier_rows.append({
+                            "Edge Tier": tier, "Bets": len(tb), "Wins": w,
+                            "Hit %": f"{w/len(tb)*100:.0f}%",
+                            "ROI":   round(pl/stk*100, 1) if stk else 0,
+                        })
+                    if tier_rows:
+                        st.dataframe(
+                            pd.DataFrame(tier_rows).style
+                                .map(_roi_c, subset=["ROI"])
+                                .format({"ROI": "{:+.1f}%"}),
+                            use_container_width=True, hide_index=True,
+                        )
+                    else:
+                        st.caption("No settled bets above 3% edge yet.")
+
+                # Favorite vs underdog
+                with th2:
+                    st.markdown("**Favorite vs Underdog**")
+                    favs, dogs = [], []
+                    for b in h2h_settled:
+                        odds = b.get("odds") or 0
+                        if odds < 0:   favs.append(b)
+                        elif odds > 0: dogs.append(b)
+                    fv_rows = []
+                    for label, grp in [("Favorite (−odds)", favs), ("Underdog (+odds)", dogs)]:
+                        if not grp: continue
+                        w   = sum(1 for b in grp if b.get("result") == "Win")
+                        pl  = sum(float(b.get("profit_loss") or 0) for b in grp)
+                        stk = sum(float(b.get("stake") or 0) for b in grp)
+                        fv_rows.append({
+                            "Side": label, "Bets": len(grp), "Wins": w,
+                            "Hit %": f"{w/len(grp)*100:.0f}%",
+                            "ROI":   round(pl/stk*100, 1) if stk else 0,
+                        })
+                    if fv_rows:
+                        st.dataframe(
+                            pd.DataFrame(fv_rows).style
+                                .map(_roi_c, subset=["ROI"])
+                                .format({"ROI": "{:+.1f}%"}),
+                            use_container_width=True, hide_index=True,
+                        )
+                    else:
+                        st.caption("No settled bets with odds data yet.")
+
+                # Player-level breakdown
+                st.markdown("**Player Performance — Who Crushed Their Matchups?**")
+                plyr_stats = {}
+                for b in h2h_settled:
+                    p = b.get("player_name", "Unknown")
+                    plyr_stats.setdefault(p, {"n":0,"wins":0,"pl":0.0,"stk":0.0})
+                    plyr_stats[p]["n"]    += 1
+                    plyr_stats[p]["wins"] += 1 if b.get("result") == "Win" else 0
+                    plyr_stats[p]["pl"]   += float(b.get("profit_loss") or 0)
+                    plyr_stats[p]["stk"]  += float(b.get("stake") or 0)
+
+                plyr_rows = []
+                for p, s in sorted(plyr_stats.items(), key=lambda x: -x[1]["pl"]):
+                    plyr_rows.append({
+                        "Player":   p,
+                        "H2H Bets": s["n"],
+                        "Wins":     s["wins"],
+                        "Hit %":    f"{s['wins']/s['n']*100:.0f}%",
+                        "P&L":      s["pl"],
+                        "ROI":      round(s["pl"]/s["stk"]*100, 1) if s["stk"] else 0,
+                    })
+
+                def _pl_c(val):
+                    if isinstance(val,(int,float)):
+                        return "color:#69f0ae;font-weight:600" if val > 0 else "color:#ef9a9a"
+                    return ""
+
+                st.dataframe(
+                    pd.DataFrame(plyr_rows).style
+                        .map(_pl_c,  subset=["P&L"])
+                        .map(_roi_c, subset=["ROI"])
+                        .format({"P&L": "${:+.2f}", "ROI": "{:+.1f}%"}),
+                    use_container_width=True, hide_index=True,
+                )
 
 
 # ════════════════════════════════════════════════════════════
@@ -2344,7 +2599,31 @@ def _render_live_alerts():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ─ Live alert cards ───────────────────────────────────────────────────────────
-    if not live_round:
+    tourn_done = live_round and sum(
+        1 for p in live if (p.get("thru") or 0) >= 18
+    ) >= len(live) * 0.85
+
+    if tourn_done:
+        n_pending_h2h = 0
+        try:
+            _pend = get_supabase().table("bets").select("market,result") \
+                        .eq("result", "Pending").execute().data or []
+            n_pending_h2h = sum(1 for b in _pend if "H2H" in (b.get("market") or ""))
+        except Exception:
+            pass
+        grade_note = (f" · **{n_pending_h2h} pending H2H bet{'s' if n_pending_h2h != 1 else ''}** to grade"
+                      if n_pending_h2h else "")
+        st.markdown(f"""<div style="background:#1a2e1a; border:1px solid #4caf50;
+                border-radius:6px; padding:14px 18px; margin:8px 0;">
+            <div style="font-size:1rem; font-weight:700; color:#69f0ae">
+                🏁 Tournament Complete — Final Results Posted
+            </div>
+            <div style="color:#a5d6a7; font-size:0.88rem; margin-top:4px">
+                Live alerts are paused. Grade your results in
+                <b>📝 Tracker → 🏌️ Grade H2H</b>{grade_note}
+            </div>
+        </div>""", unsafe_allow_html=True)
+    elif not live_round:
         st.markdown("""<div class="info-box">
             ⏳ Live signals appear once the round begins.<br>
             Calibration and market analytics below are always available.
