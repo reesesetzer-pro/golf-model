@@ -369,6 +369,31 @@ with st.spinner("Loading live data..."):
         st.error(f"Could not connect to database: {e}")
         st.stop()
 
+# Current event — derive from schedule (most recent start_date <= today), then filter field
+current_event = "Current Event"
+current_event_id = None
+_today = datetime.now(timezone.utc).date()
+for e in schedule:  # already ordered by start_date desc
+    try:
+        _edate = datetime.fromisoformat(e["start_date"]).date()
+    except Exception:
+        continue
+    if _edate <= _today:
+        current_event_id = e.get("event_id")
+        current_event    = e.get("event_name", current_event)
+        break
+
+# Filter field to current event only
+if current_event_id is not None:
+    field = [r for r in field if str(r.get("event_id")) == str(current_event_id)]
+elif field:
+    # fallback: use whatever event_id is in field
+    current_event_id = field[0].get("event_id")
+    for e in schedule:
+        if str(e.get("event_id")) == str(current_event_id):
+            current_event = e.get("event_name", current_event)
+            break
+
 # Index data
 skill_by_id  = {int(p["dg_id"]): p for p in skill if p.get("dg_id")}
 field_ids    = {int(p["dg_id"]) for p in field if p.get("dg_id")}
@@ -383,16 +408,6 @@ round_in_progress   = (
     not tournament_complete
     and any((p.get("thru") or 0) > 0 for p in _lp_active)
 )
-
-# Current event
-current_event = "Current Event"
-current_event_id = None
-if field:
-    current_event_id = field[0].get("event_id")
-    for e in schedule:
-        if str(e.get("event_id")) == str(current_event_id):
-            current_event = e.get("event_name", current_event)
-            break
 
 # Course rounds
 course_rounds = {}
