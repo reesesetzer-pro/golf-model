@@ -396,9 +396,10 @@ if _best_event:
 elif field:
     current_event_id = field[0].get("event_id")
 
-# Filter field to current event only
+# Filter field and matchups to current event only
 if current_event_id is not None:
-    field = [r for r in field if str(r.get("event_id")) == str(current_event_id)]
+    field    = [r for r in field    if str(r.get("event_id")) == str(current_event_id)]
+    matchups = [r for r in matchups if str(r.get("event_id")) == str(current_event_id)]
 
 # Index data
 skill_by_id  = {int(p["dg_id"]): p for p in skill if p.get("dg_id")}

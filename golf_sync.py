@@ -813,7 +813,9 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
     if not data:
         return
     event_name = data.get("event_name", "")
-    event_id   = str(data.get("event_id", "current"))
+    # DataGolf matchups endpoint doesn't return event_id — pull it from field-updates
+    _field_data = dg_get("field-updates", {"tour": tour}) or {}
+    event_id    = str(_field_data.get("event_id") or data.get("event_id") or "current")
     round_num  = data.get("round_num", 0)
     match_list = data.get("match_list", [])
 
