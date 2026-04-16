@@ -369,13 +369,13 @@ with st.spinner("Loading live data..."):
         st.error(f"Could not connect to database: {e}")
         st.stop()
 
-# Current event — pick whichever event_id in the field table is closest to today
-# (handles pre-loaded fields for upcoming tournaments)
+# Current event — from schedule, pick the event_id present in the field table
+# whose start_date is closest to today (handles pre-loaded upcoming events)
 current_event = "Current Event"
 current_event_id = None
 _today = datetime.now(timezone.utc).date()
-
 _field_event_ids = {str(r.get("event_id")) for r in field if r.get("event_id")}
+
 _best_event = None
 _best_delta = None
 for e in schedule:
@@ -393,12 +393,12 @@ for e in schedule:
 if _best_event:
     current_event_id = _best_event.get("event_id")
     current_event    = _best_event.get("event_name", current_event)
+elif field:
+    current_event_id = field[0].get("event_id")
 
 # Filter field to current event only
 if current_event_id is not None:
     field = [r for r in field if str(r.get("event_id")) == str(current_event_id)]
-elif field:
-    current_event_id = field[0].get("event_id")
 
 # Index data
 skill_by_id  = {int(p["dg_id"]): p for p in skill if p.get("dg_id")}

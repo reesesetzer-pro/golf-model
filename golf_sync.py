@@ -542,7 +542,7 @@ def sync_schedule(tour: str = "pga", season: int = 2026):
             "season":     season,
             "course":     e.get("course"),
             "location":   e.get("location"),
-            "start_date": e.get("date"),
+            "start_date": e.get("start_date"),
             "winner":     e.get("winner"),
             "updated_at": now_utc(),
         }
