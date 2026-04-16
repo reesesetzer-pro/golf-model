@@ -369,30 +369,36 @@ with st.spinner("Loading live data..."):
         st.error(f"Could not connect to database: {e}")
         st.stop()
 
-# Current event — derive from schedule (most recent start_date <= today), then filter field
+# Current event — pick whichever event_id in the field table is closest to today
+# (handles pre-loaded fields for upcoming tournaments)
 current_event = "Current Event"
 current_event_id = None
 _today = datetime.now(timezone.utc).date()
-for e in schedule:  # already ordered by start_date desc
+
+_field_event_ids = {str(r.get("event_id")) for r in field if r.get("event_id")}
+_best_event = None
+_best_delta = None
+for e in schedule:
+    if str(e.get("event_id")) not in _field_event_ids:
+        continue
     try:
         _edate = datetime.fromisoformat(e["start_date"]).date()
     except Exception:
         continue
-    if _edate <= _today:
-        current_event_id = e.get("event_id")
-        current_event    = e.get("event_name", current_event)
-        break
+    _delta = abs((_edate - _today).days)
+    if _best_delta is None or _delta < _best_delta:
+        _best_delta = _delta
+        _best_event = e
+
+if _best_event:
+    current_event_id = _best_event.get("event_id")
+    current_event    = _best_event.get("event_name", current_event)
 
 # Filter field to current event only
 if current_event_id is not None:
     field = [r for r in field if str(r.get("event_id")) == str(current_event_id)]
 elif field:
-    # fallback: use whatever event_id is in field
     current_event_id = field[0].get("event_id")
-    for e in schedule:
-        if str(e.get("event_id")) == str(current_event_id):
-            current_event = e.get("event_name", current_event)
-            break
 
 # Index data
 skill_by_id  = {int(p["dg_id"]): p for p in skill if p.get("dg_id")}
