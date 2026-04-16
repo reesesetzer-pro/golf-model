@@ -971,11 +971,15 @@ def _render_best_h2h():
 
     col_f1, col_f2, col_f3 = st.columns([2, 2, 2])
     with col_f1:
-        min_edge_h2h = st.slider("Min Edge %", 0.0, 10.0, 2.0, 0.5,
+        min_edge_h2h = st.slider("Min Edge %", 0.0, 10.0, 1.0, 0.5,
                                   key="h2h_edge", label_visibility="collapsed")
     with col_f2:
-        round_filter = st.selectbox("Round", ["Round 4", "Round 3", "Round 2", "Round 1", "All Rounds"],
-                                     label_visibility="collapsed")
+        # Auto-detect current round from matchups; fall back to All Rounds
+        _rounds_available = sorted({m.get("round_num") for m in matchups if m.get("round_num")})
+        _cur_round = f"Round {_rounds_available[0]}" if _rounds_available else "All Rounds"
+        _round_opts = [f"Round {r}" for r in sorted(_rounds_available)] + ["All Rounds"]
+        round_filter = st.selectbox("Round", _round_opts,
+                                     index=0, label_visibility="collapsed")
     with col_f3:
         side_filter = st.selectbox("Side", ["Both Sides", "Favorites Only", "Underdogs Only"],
                                     label_visibility="collapsed")
