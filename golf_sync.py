@@ -687,6 +687,13 @@ def sync_predictions(tour: str = "pga"):
     event_id = str(data.get("event_id", "current"))
     players  = data.get("baseline", [])
     course   = {p["dg_id"]: p for p in data.get("baseline_history_fit", [])}
+
+    def num(v):
+        """Convert DataGolf value to float or None (handles 'n/a' strings)."""
+        if v is None or v == "n/a" or v == "": return None
+        try: return float(v)
+        except: return None
+
     rows = []
     for p in players:
         did = p.get("dg_id")
@@ -696,16 +703,16 @@ def sync_predictions(tour: str = "pga"):
             "event_id":          event_id,
             "player_name":       p.get("player_name"),
             "tour":              tour,
-            "baseline_win":      p.get("win"),
-            "baseline_top5":     p.get("top_5"),
-            "baseline_top10":    p.get("top_10"),
-            "baseline_top20":    p.get("top_20"),
-            "baseline_make_cut": p.get("make_cut"),
-            "course_win":        cp.get("win"),
-            "course_top5":       cp.get("top_5"),
-            "course_top10":      cp.get("top_10"),
-            "course_top20":      cp.get("top_20"),
-            "course_make_cut":   cp.get("make_cut"),
+            "baseline_win":      num(p.get("win")),
+            "baseline_top5":     num(p.get("top_5")),
+            "baseline_top10":    num(p.get("top_10")),
+            "baseline_top20":    num(p.get("top_20")),
+            "baseline_make_cut": num(p.get("make_cut")),
+            "course_win":        num(cp.get("win")),
+            "course_top5":       num(cp.get("top_5")),
+            "course_top10":      num(cp.get("top_10")),
+            "course_top20":      num(cp.get("top_20")),
+            "course_make_cut":   num(cp.get("make_cut")),
             "updated_at":        now_utc(),
         })
     upsert("predictions", rows, "dg_id,event_id")
