@@ -99,8 +99,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def dg_get(endpoint: str, params: dict = {}) -> dict | list | None:
-    """GET a DataGolf endpoint with error handling and rate-limit backoff."""
+def dg_get(endpoint: str, params: dict = {}):
+    """GET a DataGolf endpoint with error handling and rate-limit backoff.
+
+    400s are treated as permanent (no retry, debug-level log) since they almost
+    always mean the requested event_id/year combination doesn't exist.
+    """
     params["key"] = DG_API_KEY
     params.setdefault("file_format", "json")
     url = f"{DG_BASE}/{endpoint}"
@@ -112,6 +116,10 @@ def dg_get(endpoint: str, params: dict = {}) -> dict | list | None:
                 log.warning(f"Rate limited — waiting {wait}s before retry {attempt+1}")
                 time.sleep(wait)
                 continue
+            if r.status_code == 400:
+                # Permanent client error — usually a stale event_id. Skip silently.
+                log.debug(f"DG 400 (skipping): {endpoint} {params}")
+                return None
             r.raise_for_status()
             return r.json()
         except requests.RequestException as e:
@@ -121,7 +129,7 @@ def dg_get(endpoint: str, params: dict = {}) -> dict | list | None:
     return None
 
 
-def odds_get(endpoint: str, params: dict = {}) -> dict | list | None:
+def odds_get(endpoint: str, params: dict = {}):
     """GET a The Odds API endpoint."""
     params["apiKey"] = ODDS_API_KEY
     url = f"{ODDS_BASE}/{endpoint}"
@@ -686,7 +694,7 @@ def sync_predictions(tour: str = "pga"):
         return
     event_id = str(data.get("event_id", "current"))
     players  = data.get("baseline", [])
-    course   = {p["dg_id"]: p for p in data.get("baseline_history_fit", [])}
+    course   = {p["dg_id"]: p for p in data.get("baseline_history_fit", []) if isinstance(p, dict) and "dg_id" in p}
 
     def num(v):
         """Convert DataGolf value to float or None (handles 'n/a' strings)."""
@@ -822,6 +830,12 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
     event_name = data.get("event_name", "")
     # DataGolf matchups endpoint doesn't return event_id — pull it from field-updates
     _field_data = dg_get("field-updates", {"tour": tour}) or {}
+    current_event_name = _field_data.get("event_name", "")
+    # Skip if matchups feed is stale (still serving a prior tournament's data
+    # while this week's matchups haven't been posted yet)
+    if current_event_name and event_name and event_name.strip().lower() != current_event_name.strip().lower():
+        log.warning(f"Skipping {market}: DG returned stale '{event_name}' (current is '{current_event_name}')")
+        return
     event_id    = str(_field_data.get("event_id") or data.get("event_id") or "current")
     round_num  = data.get("round_num", 0)
     match_list = data.get("match_list", [])

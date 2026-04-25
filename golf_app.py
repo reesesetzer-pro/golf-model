@@ -2949,12 +2949,20 @@ def _render_live_alerts():
 
             @st.cache_data(ttl=300)
             def load_snapshots():
-                return (get_supabase()
-                        .table("model_snapshots")
-                        .select("snapshot_at,event_name,total_settled,market_roi,adaptive_thresholds")
-                        .order("snapshot_at", desc=True)
-                        .limit(12)
-                        .execute().data or [])
+                # model_snapshots is an optional table — return [] silently if
+                # the schema hasn't been created yet (PGRST205) so the app
+                # doesn't crash. Other errors are surfaced.
+                try:
+                    return (get_supabase()
+                            .table("model_snapshots")
+                            .select("snapshot_at,event_name,total_settled,market_roi,adaptive_thresholds")
+                            .order("snapshot_at", desc=True)
+                            .limit(12)
+                            .execute().data or [])
+                except Exception as _e:
+                    if "PGRST205" in str(_e) or "does not exist" in str(_e).lower() or "could not find" in str(_e).lower():
+                        return []
+                    raise
 
             snaps = load_snapshots()
             if snaps:
