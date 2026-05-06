@@ -396,6 +396,84 @@ if _best_event:
 elif field:
     current_event_id = field[0].get("event_id")
 
+# ── Tournament weather forecast (display-only) ────────────────────────────────
+# DataGolf's win/top5/cut probs already encode course-specific scoring variance
+# (weather is a major driver of that variance). Surfacing weather here as a
+# display card gives you context — applying a multiplier on top of DG would
+# double-count. Trust DG's prob distribution; use this card to size up/down
+# manually if conditions are extreme.
+@st.cache_data(ttl=1800)  # 30 min refresh
+def _golf_weather_for_event(event):
+    if not event:
+        return None
+    location = event.get("location", "")
+    if not location:
+        return None
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "..", "scripts"))
+        from weather import fetch_forecast, golf_scoring_multiplier
+    except Exception:
+        return None
+    # Crude location → coords via cache; falls back to skipping if not pre-mapped
+    coords = _GOLF_COURSE_COORDS.get(event.get("event_name", ""))
+    if not coords:
+        return {"unmapped": True, "location": location,
+                "event_name": event.get("event_name", "")}
+    from datetime import datetime as _dt, timedelta as _td
+    # Sample forecast across 4 rounds (Thu-Sun). Reasonable defaults if dates absent.
+    try:
+        start = _dt.fromisoformat(event["start_date"])
+    except Exception:
+        start = _dt.utcnow()
+    samples = []
+    for offset in range(0, 4):
+        f = fetch_forecast(coords[0], coords[1], start + _td(days=offset, hours=15))
+        if f:
+            samples.append(f)
+    if not samples:
+        return None
+    avg = {
+        "temp_f":     round(sum(s["temp_f"] for s in samples) / len(samples), 1),
+        "wind_mph":   round(sum(s["wind_mph"] for s in samples) / len(samples), 1),
+        "precip_pct": max(s["precip_pct"] for s in samples),
+    }
+    avg["mult"] = golf_scoring_multiplier(avg["temp_f"], avg["wind_mph"], avg["precip_pct"])
+    avg["location"] = location
+    avg["event_name"] = event.get("event_name", "")
+    return avg
+
+
+# Course → (lat, lon) lookup. Hand-curated; extend as new tournaments come up.
+_GOLF_COURSE_COORDS = {
+    # Majors
+    "Masters Tournament":           (33.5021, -82.0233),  # Augusta National
+    "PGA Championship":             (None, None),         # rotates — fill at event time
+    "U.S. Open":                    (None, None),         # rotates
+    "The Open Championship":        (None, None),         # rotates (UK — outside weather.gov anyway)
+    # Recurring PGA stops
+    "Wells Fargo Championship":     (35.0931, -80.7658),  # Quail Hollow
+    "Wells Fargo Championship at Quail Hollow": (35.0931, -80.7658),
+    "AT&T Pebble Beach Pro-Am":     (36.5683, -121.9499),
+    "The Players Championship":     (30.1973, -81.3942),  # TPC Sawgrass
+    "RBC Heritage":                 (32.1494, -80.8128),  # Harbour Town
+    "Memorial Tournament":          (40.1473, -83.1467),  # Muirfield Village
+    "Travelers Championship":       (41.7906, -72.7681),  # TPC River Highlands
+    "Genesis Invitational":         (34.0746, -118.4123), # Riviera
+    "Arnold Palmer Invitational":   (28.4830, -81.5272),  # Bay Hill
+    "WM Phoenix Open":              (33.6404, -111.9072), # TPC Scottsdale
+    "Sony Open in Hawaii":          (21.2691, -157.8253), # Waialae
+    "The Sentry":                   (20.9979, -156.6663), # Kapalua
+    "Cognizant Classic in The Palm Beaches": (26.8480, -80.1380),  # PGA National
+    "Valspar Championship":         (28.0814, -82.6989),  # Innisbrook Copperhead
+    "Texas Children's Houston Open": (29.7604, -95.5577), # Memorial Park
+    "John Deere Classic":           (41.4517, -90.4914),  # TPC Deere Run
+    "Rocket Mortgage Classic":      (42.4194, -83.2192),  # Detroit Golf Club
+    "3M Open":                      (45.0667, -93.5350),  # TPC Twin Cities
+    # Add more as needed — golf_sync prints unmapped events to logs
+}
+
 # Filter field and matchups to current event only
 if current_event_id is not None:
     field    = [r for r in field    if str(r.get("event_id")) == str(current_event_id)]
@@ -523,6 +601,48 @@ for p in [x for x in field if not x.get("withdrawn")]:
         "course_rounds": course_rounds.get(did, []),
     })
 field_players.sort(key=lambda x: (x["dg_rank"] or 9999))
+
+# ── Tournament weather (display-only) ──────────────────────────────────────────
+_wx = _golf_weather_for_event(_best_event) if _best_event else None
+if _wx and not _wx.get("unmapped"):
+    _wind_tag = ("🌬️ HIGH WIND" if _wx["wind_mph"] >= 18 else
+                 "🌬️ Breezy"    if _wx["wind_mph"] >= 12 else
+                 "✓ Calm")
+    _temp_tag = ("🥶 Cold" if _wx["temp_f"] < 50 else
+                 "🥵 Hot"  if _wx["temp_f"] > 90 else
+                 "Mild")
+    _rain_tag = ("🌧️ Rain likely" if _wx["precip_pct"] >= 50 else
+                 "☂️ Some chance" if _wx["precip_pct"] >= 25 else "Dry")
+    _impact   = ("Scoring up ↑"   if _wx["mult"] > 1.02 else
+                 "Scoring down ↓" if _wx["mult"] < 0.99 else
+                 "Neutral")
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#0c1e42 0%,#1a3a5e 100%);
+                border-radius:12px;padding:14px 20px;margin-bottom:16px;
+                border:1px solid rgba(46,117,182,0.3)">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px">
+        <div>
+          <div style="font-size:0.7rem;color:#5a8ab4;text-transform:uppercase;letter-spacing:0.08em">
+            🌤️ TOURNAMENT WEATHER (4-round avg)
+          </div>
+          <div style="font-size:1rem;font-weight:600;margin-top:4px">
+            {_wx['temp_f']:.0f}°F · {_wx['wind_mph']:.0f} mph wind · {_wx['precip_pct']:.0f}% precip
+          </div>
+          <div style="font-size:0.78rem;color:#b8b8d4;margin-top:3px">
+            {_temp_tag} · {_wind_tag} · {_rain_tag}  →  <strong>{_impact}</strong>
+            <span style="color:#5a8ab4">(scoring mult: {_wx['mult']:.3f})</span>
+          </div>
+        </div>
+        <div style="font-size:0.72rem;color:#5a8ab4;text-align:right;max-width:340px">
+          DataGolf probabilities already encode course/weather variance. Use this
+          card for context — don't double-multiply DG's probs.
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+elif _wx and _wx.get("unmapped"):
+    st.caption(f"🌤️ Weather: {_wx.get('event_name','this event')} not in coords table — "
+               f"add `\"{_wx.get('event_name','')}\": (lat, lon)` to `_GOLF_COURSE_COORDS` in golf_app.py")
 
 # ── Metric cards ─────────────────────────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
@@ -2114,39 +2234,25 @@ def _render_auto_scheduler():
         it runs silently in the background all week.
     </div>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="section-header">Step 1 — Create the Batch File</div>', unsafe_allow_html=True)
-    st.markdown("Save this as `golf_sync_live.bat` in your `C:\\Golf Model` folder:")
-    st.code(r"""@echo off
-cd /d "C:\Golf Model"
-py golf_sync.py --mode live
-""", language="batch")
+    st.markdown('<div class="section-header">Step 1 — Create the Sync Script</div>', unsafe_allow_html=True)
+    st.markdown("Save this as `golf_sync_live.sh` in your Golf Model folder, then `chmod +x golf_sync_live.sh`:")
+    st.code(r"""#!/bin/bash
+cd "$(dirname "$0")"
+/Users/reesesetzer/Desktop/BettingModels/.venv/bin/python golf_sync.py --mode live
+""", language="bash")
 
-    st.markdown('<div class="section-header">Step 2 — Open Task Scheduler</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Step 2 — Schedule via launchd or cron</div>', unsafe_allow_html=True)
     st.markdown("""
-1. Press **Win + S** and search **Task Scheduler**
-2. Click **Create Basic Task** in the right panel
-3. Name it: `Golf Model Live Sync`
-4. Click **Next**
-""")
+**Option A — cron** (simpler):
+```bash
+crontab -e
+# Add this line — runs every 30 min from 8AM to 8PM on Thu-Sun:
+*/30 8-19 * * 4-7  /path/to/Golf\\ Model/golf_sync_live.sh
+```
 
-    st.markdown('<div class="section-header">Step 3 — Set the Trigger</div>', unsafe_allow_html=True)
-    st.markdown("""
-1. Select **Daily** → Click **Next**
-2. Set start time: **8:00 AM** (before Round 1 tee times)
-3. Click **Next**
-4. Select **Action: Start a program**
-5. Browse to `C:\\Golf Model\\golf_sync_live.bat`
-6. Click **Next** → **Finish**
-""")
-
-    st.markdown('<div class="section-header">Step 4 — Set Repeat Interval</div>', unsafe_allow_html=True)
-    st.markdown("""
-1. Find your new task in the Task Scheduler library
-2. Right-click → **Properties**
-3. Go to **Triggers** tab → **Edit**
-4. Check **Repeat task every:** → set to **30 minutes**
-5. Set **for a duration of:** → **12 hours**
-6. Click **OK** → **OK**
+**Option B — launchd** (more idiomatic on Mac, survives reboots):
+Create `~/Library/LaunchAgents/com.user.golf-sync.plist` with the script
+path and a `StartInterval` of 1800 seconds. `launchctl load` it.
 """)
 
     st.markdown("""<div class="info-box">
