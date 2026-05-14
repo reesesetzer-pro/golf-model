@@ -1082,6 +1082,50 @@ def _render_matchup_tool():
 # ════════════════════════════════════════════════════════════
 # VIEW: BEST H2H PLAYS
 # ════════════════════════════════════════════════════════════
+def _play_recommendation(dg_prob: float, american_odds) -> dict:
+    """Return play recommendation based on DG probability + price + lifetime context.
+
+    Lifetime H2H ROI is -40% on n=12. With that as evidence the model may be
+    overconfident, we stress-test each pick: would the +EV survive if DG is
+    10pp overconfident? Only plays that DO survive get parlay-worthy status;
+    everything else gets single-only or skip.
+
+    Returns: {tier, badge, color, reasoning}
+    """
+    try:
+        odds = float(american_odds) if american_odds not in (None, "", "—") else None
+    except Exception:
+        odds = None
+    if dg_prob is None or odds is None or odds == 0:
+        return {"tier": "skip", "badge": "—", "color": "#666",
+                "reasoning": "missing data"}
+    # Convert American → decimal
+    decimal = 1 + (odds / 100.0 if odds > 0 else 100.0 / abs(odds))
+    ev_single = dg_prob * (decimal - 1) - (1 - dg_prob)
+    # Stress: assume DG is 10pp overconfident (the -40% lifetime ROI gives us evidence)
+    stress_prob = max(0.01, dg_prob - 0.10)
+    ev_stress = stress_prob * (decimal - 1) - (1 - stress_prob)
+
+    if ev_single < 0:
+        return {"tier": "skip", "badge": "🚫 SKIP",
+                "color": "#ff5252",
+                "reasoning": f"Single EV {ev_single*100:.1f}% — book has the edge at this price"}
+    # PARLAY OK: high prob AND survives 10pp shock with only minimal damage
+    if dg_prob >= 0.70 and ev_stress >= -0.02:
+        return {"tier": "parlay", "badge": "🤝 PARLAY OK",
+                "color": "#69f0ae",
+                "reasoning": f"Survives 10pp overconfidence shock ({ev_stress*100:+.1f}% EV worst-case)"}
+    # SINGLE only: positive EV but parlay would compound the risk
+    if ev_single >= 0.05:
+        return {"tier": "single", "badge": "🎯 SINGLE ONLY",
+                "color": "#ffcc02",
+                "reasoning": f"+{ev_single*100:.1f}% EV solo, but parlay risk is {ev_stress*100:+.1f}% under shock"}
+    # SINGLE LIGHT — marginal +EV, smaller size
+    return {"tier": "light", "badge": "⚠ LIGHT SIZE",
+            "color": "#ff9800",
+            "reasoning": f"Marginal +{ev_single*100:.1f}% EV — half-unit max"}
+
+
 def _render_best_h2h():
     st.markdown('<div class="section-header">🎯 Best H2H Plays Today — Ranked by Edge</div>', unsafe_allow_html=True)
 
@@ -1089,6 +1133,12 @@ def _render_best_h2h():
         Matchups ranked by edge % (DG model win probability vs implied book probability).
         Only plays above the sharp threshold are shown. Refresh after running
         <code>py golf_sync.py --mode live</code> during tournament rounds.
+        <br><br>
+        Each pick gets a <b>🤝 PARLAY OK / 🎯 SINGLE ONLY / ⚠ LIGHT / 🚫 SKIP</b> tag
+        based on a stress-test: would the pick still be +EV if DataGolf is 10pp
+        overconfident? Lifetime H2H ROI is -40% — that's our evidence the model
+        may be overstating probabilities, so we only allow parlays from picks that
+        survive the shock.
     </div>""", unsafe_allow_html=True)
 
     col_f1, col_f2, col_f3 = st.columns([2, 2, 2])
@@ -1196,7 +1246,61 @@ def _render_best_h2h():
                     })
 
         if h2h_rows:
+            # Annotate each play with parlay/single recommendation. Edge here is
+            # already DG_implied - book_implied (in percentage points), so the
+            # DG_prob we need is the raw DG win probability divided by 100.
+            for play in h2h_rows:
+                rec = _play_recommendation(play["DG Win%"] / 100.0, play.get("Best Book"))
+                play["_rec"] = rec
             sorted_plays = sorted(h2h_rows, key=lambda x: -x["Edge%"])
+
+            # ── 🤝 Parlay-worthy summary at the top ────────────────────────
+            parlay_picks = [p for p in sorted_plays if p["_rec"]["tier"] == "parlay"]
+            if parlay_picks:
+                cards_html = []
+                for p in parlay_picks[:6]:
+                    cards_html.append(f"""
+                        <div style="background:#0d3a23; border-left:3px solid #69f0ae;
+                                    padding:8px 12px; border-radius:4px; min-width:200px; flex:1;">
+                            <div style="font-size:12px; color:#69f0ae; font-weight:600;">
+                                {p['Bet On']} <span style='color:#888'>vs {p['Opponent']}</span>
+                            </div>
+                            <div style="font-size:11px; color:#aaa; margin-top:2px;">
+                                R{p['Round']} · DG {p['DG Win%']:.1f}% · {p['Best Book']} ({p.get('Book','')})
+                            </div>
+                        </div>
+                    """)
+                st.markdown(f"""
+                    <div style="margin: 10px 0 18px 0;">
+                        <div style="color:#69f0ae; font-weight:700; font-size:14px;
+                                    letter-spacing:1px; margin-bottom:6px;">
+                            🤝 PARLAY-WORTHY TONIGHT ({len(parlay_picks)})
+                        </div>
+                        <div style="font-size:11px; color:#888; margin-bottom:8px;">
+                            Each pick survives a 10pp overconfidence stress test
+                            (DG-prob shock for the -40% lifetime ROI). Safe candidates
+                            for 2-leg parlays at half-unit. Avoid 3+ legs until grader
+                            has 30+ settled bets to verify DG calibration.
+                        </div>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            {''.join(cards_html)}
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                    <div style="background:#3a2a1a; border-left:3px solid #ff9800;
+                                padding:10px 14px; border-radius:4px; margin:10px 0 18px;">
+                        <div style="color:#ff9800; font-weight:600; font-size:13px;">
+                            🚫 No parlay-worthy picks tonight
+                        </div>
+                        <div style="color:#aaa; font-size:11px; margin-top:4px;">
+                            No picks survive the 10pp overconfidence stress test. Stick to
+                            single-leg plays only.
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
             st.markdown(f"""<div class="info-box">
                 {len(sorted_plays)} plays above {min_edge_h2h:.1f}% edge threshold ·
                 Sorted by edge % · Click <b>🎯 Take It</b> to instantly log the bet
@@ -1212,25 +1316,29 @@ def _render_best_h2h():
                 book   = play.get("Book","")
                 dg_w   = play["DG Win%"]
                 bk_w   = play["Book Impl%"]
+                rec    = play["_rec"]
 
-                # Color border by tier
-                if edge >= 5:   border = "#69f0ae"
-                elif edge >= 3: border = "#a5d6a7"
-                else:           border = "#81c784"
+                # Color border by recommendation tier (overrides the edge color)
+                border = rec["color"]
 
                 col_info, col_btn = st.columns([5, 1])
                 with col_info:
                     st.markdown(f"""
                     <div style="border-left:4px solid {border}; padding:10px 14px; margin:4px 0;
                                 background:#1a1a1a; border-radius:4px;">
-                        <span style="color:{border}; font-weight:700; font-size:1rem">{sv}</span>
+                        <span style="color:{border}; font-weight:700; font-size:0.95rem">{rec['badge']}</span>
+                        <span style="color:#888; font-size:0.85rem; margin-left:8px">{sv}</span>
                         <span style="color:#fff; font-weight:600; margin-left:12px">{player}</span>
                         <span style="color:#888"> vs {opp}</span>
                         <span style="color:#ffcc02; margin-left:16px">R{play['Round']}</span>
                         <br>
                         <span style="color:#90a4ae; font-size:0.85rem">
-                            DG Model: {dg_w:.1f}% · Book Implied: {bk_w:.1f}% ·
-                            DG Odds: {dg_odds} · Best Book: {best} ({book})
+                            DG: {dg_w:.1f}% · Book impl: {bk_w:.1f}% ·
+                            DG Odds: {dg_odds} · Best: {best} ({book})
+                        </span>
+                        <br>
+                        <span style="color:#777; font-size:0.78rem; font-style:italic;">
+                            {rec['reasoning']}
                         </span>
                     </div>
                     """, unsafe_allow_html=True)
