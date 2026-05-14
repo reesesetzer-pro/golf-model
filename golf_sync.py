@@ -676,12 +676,12 @@ def sync_rounds(tour: str = "pga", year: int = 2026, event_id: str = "all"):
 
         # Batch upsert every 5 events to avoid huge payloads
         if len(all_rows) >= 500:
-            upsert("rounds", all_rows)
+            upsert("rounds", all_rows, conflict_col="dg_id,event_id,year,round_num")
             all_rows = []
         time.sleep(0.3)  # stay under rate limit
 
     if all_rows:
-        upsert("rounds", all_rows)
+        upsert("rounds", all_rows, conflict_col="dg_id,event_id,year,round_num")
 
 
 def sync_predictions(tour: str = "pga"):
