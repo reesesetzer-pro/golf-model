@@ -1304,6 +1304,96 @@ def _render_must_take():
                  "Marginal positive EV (0-5%) — half-unit max. Books are pricing these "
                  "close to fair value. Take only if you like the matchup independent of the model.")
 
+    # ── ALL GOLF PLAYS — every pick the model favors, the full board ─────────
+    # Shows every H2H matchup passing the BASE 55% gate (not the +10pp adaptive
+    # tighten) with the same EV math applied. Color-coded by recommendation
+    # tier so the user can see context picks alongside the high-conviction
+    # plays. Mirrors the F5 "ALL F5 PLAYS TODAY" section.
+    all_plays = []
+    BASE_GATE = 55.0
+    for m in (matchups or []):
+        p1w = (m.get("p1_dg_win_prob") or 0)
+        p2w = (m.get("p2_dg_win_prob") or 0)
+        if p1w >= p2w:
+            prefix, name, opp, dg = "p1", m.get("p1_name",""), m.get("p2_name",""), p1w
+        else:
+            prefix, name, opp, dg = "p2", m.get("p2_name",""), m.get("p1_name",""), p2w
+        if dg * 100 < BASE_GATE:
+            continue
+        approved = {
+            "DK":  m.get(f"{prefix}_draftkings"), "FD":  m.get(f"{prefix}_fanduel"),
+            "MGM": m.get(f"{prefix}_betmgm"),     "CSR": m.get(f"{prefix}_caesars"),
+            "B365":m.get(f"{prefix}_bet365"),     "SCR": m.get(f"{prefix}_thescore"),
+            "HR":  m.get(f"{prefix}_hardrock"),
+        }
+        valid = {k: v for k, v in approved.items() if v not in (None, 0)}
+        if not valid:
+            continue
+        best_odds = max(valid.values())
+        best_book = max(valid, key=valid.get)
+        rec = _play_recommendation(dg, best_odds)
+        all_plays.append({
+            "name": name, "opp": opp, "rnd": m.get("round_num", 0),
+            "dg": dg, "valid": valid, "best_odds": best_odds, "best_book": best_book,
+            "rec": rec, "market": m.get("market",""),
+        })
+    all_plays.sort(key=lambda x: -x["dg"])
+
+    if all_plays:
+        st.markdown("---")
+        st.markdown(f"""
+            <div style="margin: 18px 0 8px 0;">
+                <div style="color:#90a4ae; font-weight:700; font-size:14px;
+                            letter-spacing:1px;">
+                    📋 ALL GOLF PLAYS TODAY ({len(all_plays)})
+                </div>
+                <div style="color:#777; font-size:12px; margin-top:4px;">
+                    Every H2H matchup at base 55% DG gate with a listed approved-book
+                    price. Color-coded by recommendation tier — picks above are the
+                    high-conviction filter output; below is the full board including
+                    SKIP/BEST-AVAILABLE for context.
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        def _odds_str(v):
+            try: v = int(v)
+            except: return "—"
+            return f"+{v}" if v > 0 else str(v)
+
+        for p in all_plays:
+            book_cells = " · ".join(
+                f"<span style='color:#666'>{bk}</span> <strong style='color:#ccc'>{_odds_str(v)}</strong>"
+                for bk, v in p["valid"].items()
+            )
+            st.markdown(f"""
+                <div style="border-left:4px solid {p['rec']['color']}; background:#15151f;
+                            padding:8px 14px; margin:4px 0; border-radius:4px;
+                            display:flex; flex-wrap:wrap; gap:14px; align-items:center;">
+                    <div style="flex:1; min-width:280px;">
+                        <span style="color:{p['rec']['color']}; font-weight:700; font-size:12px;">
+                            {p['rec']['badge']}
+                        </span>
+                        <span style="color:#fff; font-weight:600; margin-left:10px;">{p['name']}</span>
+                        <span style="color:#888;"> vs {p['opp']}</span>
+                    </div>
+                    <div style="display:flex; gap:18px; font-family:'Space Mono',monospace;">
+                        <div style="text-align:center;">
+                            <div style="font-size:9px;color:#666;letter-spacing:1px;">R</div>
+                            <div style="font-size:13px;color:#ffcc02;">{p['rnd']}</div>
+                        </div>
+                        <div style="text-align:center;">
+                            <div style="font-size:9px;color:#666;letter-spacing:1px;">DG</div>
+                            <div style="font-size:13px;color:#00D4FF;">{p['dg']*100:.1f}%</div>
+                        </div>
+                        <div style="text-align:center;">
+                            <div style="font-size:9px;color:#666;letter-spacing:1px;">BEST</div>
+                            <div style="font-size:13px;color:#69f0ae;">{_odds_str(p['best_odds'])} {p['best_book']}</div>
+                        </div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
     # Top 2-leg parlay suggestion
     if len(parlay_picks) >= 2:
         # Pick the 2 picks with biggest model-vs-market edge (DG prob - best book implied prob)
