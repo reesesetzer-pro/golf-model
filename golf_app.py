@@ -701,7 +701,8 @@ with c4:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────────
-tab_forecast, tab_edges, tab_h2h, tab_live, tab_alerts, tab_tracker, tab_research = st.tabs([
+tab_must_take, tab_forecast, tab_edges, tab_h2h, tab_live, tab_alerts, tab_tracker, tab_research = st.tabs([
+    "🎯 MUST TAKE",
     "📊 Forecast",
     "💰 Edges",
     "⚔️ H2H",
@@ -1082,6 +1083,233 @@ def _render_matchup_tool():
 # ════════════════════════════════════════════════════════════
 # VIEW: BEST H2H PLAYS
 # ════════════════════════════════════════════════════════════
+def _render_must_take():
+    """🎯 MUST TAKE — every H2H pick passing the adaptive gate, grouped by
+    recommendation tier, with all-book pricing inline. The single hub for
+    'what should I bet tonight in golf'."""
+    st.markdown('<div class="section-header">🎯 Must Take — Tonight\'s Strongest Plays</div>',
+                unsafe_allow_html=True)
+
+    # Lifetime track-record context up top so the user always sees the receipts
+    try:
+        from supabase import create_client as _cc
+    except Exception:
+        _cc = None
+    settled_count = 0
+    h2h_roi = None
+    try:
+        sb_client = get_supabase()
+        bets_raw = sb_client.table("bets").select(
+            "result,profit_loss,stake,market"
+        ).execute().data or []
+        settled = [b for b in bets_raw if b.get("result") in ("Win","Loss","Push")]
+        settled_count = len(settled)
+        h2h_settled = [b for b in settled if "H2H" in (b.get("market") or "")]
+        if h2h_settled:
+            staked = sum(float(b.get("stake") or 0) for b in h2h_settled)
+            pnl    = sum(float(b.get("profit_loss") or 0) for b in h2h_settled)
+            h2h_roi = (pnl / staked * 100) if staked else 0
+    except Exception:
+        pass
+
+    # Adaptive gate label
+    base_gate = 55
+    gate = 65 if (h2h_roi is not None and h2h_roi < -15) else base_gate
+    gate_status = ("🟥 tight (+10pp)" if gate == 65 else
+                   "🟧 watch (+3pp)" if gate == 58 else "🟢 base")
+
+    st.markdown(f"""
+        <div style="background:#1a1a2a; padding:14px 18px; border-radius:8px;
+                    border-left:4px solid #69f0ae; margin-bottom:18px;">
+            <div style="font-size:11px; color:#888; letter-spacing:1.5px; font-weight:600;
+                        margin-bottom:8px;">LIVE TRACK RECORD</div>
+            <div style="display:flex; gap:24px; flex-wrap:wrap;">
+                <div>
+                    <div style="font-size:11px; color:#aaa;">H2H ROI (lifetime)</div>
+                    <div style="font-size:22px; color:{('#ff5252' if (h2h_roi or 0) < 0 else '#69f0ae')};
+                                font-weight:700; font-family:'Space Mono',monospace;">
+                        {(h2h_roi if h2h_roi is not None else 0):+.1f}%
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size:11px; color:#aaa;">Settled bets</div>
+                    <div style="font-size:22px; color:#fff; font-weight:700;
+                                font-family:'Space Mono',monospace;">{settled_count}</div>
+                </div>
+                <div>
+                    <div style="font-size:11px; color:#aaa;">Adaptive gate</div>
+                    <div style="font-size:22px; color:#fff; font-weight:700;
+                                font-family:'Space Mono',monospace;">{gate}% <span style="font-size:12px">{gate_status}</span></div>
+                </div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # ─── Gather H2H picks above the adaptive gate ────────────────────────────
+    must_picks = []
+    for m in (matchups or []):
+        p1w = (m.get("p1_dg_win_prob") or 0)
+        p2w = (m.get("p2_dg_win_prob") or 0)
+        if p1w >= p2w:
+            prefix, name, opp, dg = "p1", m.get("p1_name",""), m.get("p2_name",""), p1w
+        else:
+            prefix, name, opp, dg = "p2", m.get("p2_name",""), m.get("p1_name",""), p2w
+        if dg * 100 < gate:
+            continue
+        # Approved-book pricing
+        approved = {
+            "DK":  m.get(f"{prefix}_draftkings"),
+            "FD":  m.get(f"{prefix}_fanduel"),
+            "MGM": m.get(f"{prefix}_betmgm"),
+            "CSR": m.get(f"{prefix}_caesars"),
+            "B365":m.get(f"{prefix}_bet365"),
+            "SCR": m.get(f"{prefix}_thescore"),
+            "HR":  m.get(f"{prefix}_hardrock"),
+        }
+        valid = {k: v for k, v in approved.items() if v not in (None, 0)}
+        if not valid:
+            continue  # no listed price at any approved book — skip
+        best_odds = max(valid.values())
+        best_book = max(valid, key=valid.get)
+        rec = _play_recommendation(dg, best_odds)
+        if rec["tier"] in ("skip", "light"):
+            continue  # MUST TAKE is for strong-conviction picks only
+        must_picks.append({
+            "name": name, "opp": opp, "rnd": m.get("round_num", 0),
+            "dg": dg, "valid": valid, "best_odds": best_odds, "best_book": best_book,
+            "rec": rec, "market": m.get("market",""),
+        })
+
+    must_picks.sort(key=lambda x: -x["dg"])
+
+    parlay_picks = [p for p in must_picks if p["rec"]["tier"] == "parlay"]
+    single_picks = [p for p in must_picks if p["rec"]["tier"] == "single"]
+
+    # ─── Render each tier ───────────────────────────────────────────────────
+    def _odds_str(v):
+        try: v = int(v)
+        except: return "—"
+        return f"+{v}" if v > 0 else str(v)
+
+    def _render_tier(title, picks, accent_color, sub):
+        if not picks:
+            return
+        st.markdown(f"""
+            <div style="margin: 18px 0 8px 0;">
+                <div style="color:{accent_color}; font-weight:700; font-size:16px;
+                            letter-spacing:1px;">{title} ({len(picks)})</div>
+                <div style="color:#888; font-size:12px; margin-top:2px;">{sub}</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        for p in picks:
+            book_cells = " · ".join(
+                f"<span style='color:#666'>{bk}</span> <strong style='color:#eee'>{_odds_str(v)}</strong>"
+                for bk, v in p["valid"].items()
+            )
+            st.markdown(f"""
+                <div style="border-left:4px solid {accent_color}; background:#1a1a1a;
+                            padding:12px 16px; margin:6px 0; border-radius:4px;">
+                    <div style="display:flex; align-items:baseline; gap:14px;">
+                        <span style="color:{accent_color}; font-weight:700; font-size:14px;">
+                            {p['rec']['badge']}
+                        </span>
+                        <span style="color:#fff; font-weight:600; font-size:15px;">{p['name']}</span>
+                        <span style="color:#888; font-size:14px;">vs {p['opp']}</span>
+                        <span style="color:#ffcc02; margin-left:auto; font-size:13px;">
+                            R{p['rnd']} · DG {p['dg']*100:.1f}%
+                        </span>
+                    </div>
+                    <div style="color:#aaa; font-size:12px; margin-top:6px;">
+                        <strong style="color:#69f0ae;">{p['best_book']} {_odds_str(p['best_odds'])}</strong>
+                        <span style="color:#555; margin-left:10px;">· all books:</span>
+                        <span style="margin-left:6px;">{book_cells}</span>
+                    </div>
+                    <div style="color:#666; font-size:11px; font-style:italic; margin-top:4px;">
+                        {p['rec']['reasoning']}
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+    if not must_picks:
+        st.warning(
+            "🚫 **No Must-Take picks tonight.** No H2H matchups passed both the "
+            f"{gate}% adaptive gate AND the 10pp overconfidence stress test. "
+            "Sit it out — or check the ⚔️ H2H tab for softer plays at your own risk."
+        )
+        return
+
+    _render_tier("🤝 PARLAY-WORTHY", parlay_picks, "#69f0ae",
+                 "Each pick survives a 10pp overconfidence stress test — safe for "
+                 "2-leg parlays at half-unit. Avoid 3+ leg golf parlays until grader "
+                 "has 30+ settled bets to verify DG calibration.")
+    _render_tier("🎯 SINGLE-ONLY (high-EV solo)", single_picks, "#ffcc02",
+                 "Strong +EV as singles but the parlay stress-test fails — don't combine.")
+
+    # Top 2-leg parlay suggestion
+    if len(parlay_picks) >= 2:
+        # Pick the 2 picks with biggest model-vs-market edge (DG prob - best book implied prob)
+        scored = []
+        for p in parlay_picks:
+            try:
+                o = float(p["best_odds"])
+                book_imp = 100.0 / (o + 100.0) if o > 0 else abs(o) / (abs(o) + 100.0)
+                scored.append((p, p["dg"] - book_imp))
+            except Exception:
+                pass
+        scored.sort(key=lambda x: -x[1])
+        top2 = [s[0] for s in scored[:2]]
+        # Compute combined American odds
+        def _dec(o):
+            o = float(o)
+            return 1 + (o/100.0 if o > 0 else 100.0/abs(o))
+        dec_combined = _dec(top2[0]["best_odds"]) * _dec(top2[1]["best_odds"])
+        am_combined = round((dec_combined - 1) * 100) if dec_combined >= 2 else round(-100 / (dec_combined - 1))
+        combined_prob = top2[0]["dg"] * top2[1]["dg"]
+        implied = 1 / dec_combined
+        ev_pct = (combined_prob * dec_combined - 1) * 100
+        ev_stress = (max(0.01, top2[0]["dg"]-0.10) * max(0.01, top2[1]["dg"]-0.10) * dec_combined - 1) * 100
+
+        st.markdown(f"""
+            <div style="margin:24px 0 8px 0; padding:16px 18px;
+                        background:linear-gradient(135deg, #0d3a23 0%, #0a4a2a 100%);
+                        border-left:4px solid #69f0ae; border-radius:8px;">
+                <div style="color:#69f0ae; font-weight:700; font-size:15px;">
+                    💎 SUGGESTED 2-LEG PARLAY
+                </div>
+                <div style="color:#fff; font-size:14px; margin-top:8px;">
+                    <strong>{top2[0]['name']}</strong> over {top2[0]['opp']} (R{top2[0]['rnd']})
+                    &nbsp;<span style="color:#888">→ {top2[0]['best_book']} {_odds_str(top2[0]['best_odds'])}</span>
+                </div>
+                <div style="color:#fff; font-size:14px;">
+                    <strong>{top2[1]['name']}</strong> over {top2[1]['opp']} (R{top2[1]['rnd']})
+                    &nbsp;<span style="color:#888">→ {top2[1]['best_book']} {_odds_str(top2[1]['best_odds'])}</span>
+                </div>
+                <div style="display:flex; gap:24px; margin-top:10px; font-family:'Space Mono',monospace;">
+                    <div>
+                        <div style="color:#aaa; font-size:11px;">Combined Odds</div>
+                        <div style="color:#fff; font-size:18px; font-weight:700;">{_odds_str(am_combined)}</div>
+                    </div>
+                    <div>
+                        <div style="color:#aaa; font-size:11px;">Model Hit Rate</div>
+                        <div style="color:#69f0ae; font-size:18px; font-weight:700;">{combined_prob*100:.1f}%</div>
+                    </div>
+                    <div>
+                        <div style="color:#aaa; font-size:11px;">EV (DG calibrated)</div>
+                        <div style="color:{('#69f0ae' if ev_pct >= 0 else '#ff5252')}; font-size:18px; font-weight:700;">{ev_pct:+.1f}%</div>
+                    </div>
+                    <div>
+                        <div style="color:#aaa; font-size:11px;">EV (10pp shock)</div>
+                        <div style="color:{('#69f0ae' if ev_stress >= -5 else '#ff9800' if ev_stress >= -15 else '#ff5252')}; font-size:18px; font-weight:700;">{ev_stress:+.1f}%</div>
+                    </div>
+                </div>
+                <div style="color:#aaa; font-size:11px; margin-top:8px; font-style:italic;">
+                    Half-unit max. Skip 3+ legs.
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+
 def _play_recommendation(dg_prob: float, american_odds) -> dict:
     """Return play recommendation based on DG probability + price + lifetime context.
 
@@ -3220,6 +3448,9 @@ def _render_live_alerts():
 
 
 # ── Tab routing ──────────────────────────────────────────────────────────────────
+with tab_must_take:
+    _render_must_take()
+
 with tab_forecast:
     _fv = st.radio("", ["📊 Tournament Forecast", "📈 Skill Ratings"],
                    horizontal=True, label_visibility="collapsed", key="tab_fv")
