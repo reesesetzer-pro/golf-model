@@ -1234,8 +1234,10 @@ def _render_must_take():
 
     # ── Fallback when nothing passes +EV: surface BEST AVAILABLE ─────────────
     # Always show *something* so the page isn't empty on sharp-pricing nights.
-    # Best Available = top 3 by DG win prob from picks that cleared the gate
-    # but failed the +EV filter (book has priced sharper than the model).
+    # Best Available = top 10 by DG win prob from picks that cleared the BASE
+    # gate (55%, not the +10pp tightened version) but failed the +EV filter.
+    # Fall through to the ALL PLAYS section below; no early return so user
+    # always sees the full board.
     fallback_picks = []
     if not must_picks:
         for m in (matchups or []):
@@ -1245,7 +1247,10 @@ def _render_must_take():
                 prefix, name, opp, dg = "p1", m.get("p1_name",""), m.get("p2_name",""), p1w
             else:
                 prefix, name, opp, dg = "p2", m.get("p2_name",""), m.get("p1_name",""), p2w
-            if dg * 100 < gate:
+            # Use base 55% (not adaptive 65%) so we surface more options when
+            # the slate is sharp. Adaptive gate stays in effect for true MUST
+            # TAKE recommendations.
+            if dg * 100 < 55.0:
                 continue
             approved = {
                 "DK":  m.get(f"{prefix}_draftkings"), "FD":  m.get(f"{prefix}_fanduel"),
@@ -1268,7 +1273,7 @@ def _render_must_take():
                 "market": m.get("market",""),
             })
         fallback_picks.sort(key=lambda x: -x["dg"])
-        fallback_picks = fallback_picks[:3]
+        fallback_picks = fallback_picks[:10]
 
         if fallback_picks:
             st.markdown(f"""
@@ -1279,20 +1284,21 @@ def _render_must_take():
                     </div>
                     <div style="color:#ddd;font-size:12px;margin-top:4px;">
                         Books have priced this slate sharply — no H2H survives our +EV filter
-                        after vig. Below are the top 3 by DG win probability anyway, for context.
+                        after vig. Below are the top {len(fallback_picks)} by DG win probability anyway, for context.
                         <strong>These are not recommended bets at current prices.</strong>
                     </div>
                 </div>
             """, unsafe_allow_html=True)
             _render_tier("📊 BEST AVAILABLE (track-only)", fallback_picks, "#90a4ae",
-                         "Top 3 by DG win prob that fail the +EV filter. Skip or track-only.")
-            return
-        # No picks even cleared the gate
-        st.warning(
-            "🚫 **No Must-Take picks tonight.** No H2H matchups even passed the "
-            f"{gate}% adaptive gate. Sit it out."
-        )
-        return
+                         f"Top {len(fallback_picks)} by DG win prob that fail the +EV filter. Skip or track-only.")
+        else:
+            st.warning(
+                "🚫 **No H2H matchups passed even the base 55% DG gate.** "
+                "Either the slate is genuinely thin or the matchup data hasn't loaded. "
+                "See the ALL GOLF PLAYS section below for the full board."
+            )
+        # No early return — fall through to the ALL PLAYS section so the user
+        # always sees the complete board of available matchups.
 
     _render_tier("🤝 PARLAY-WORTHY", parlay_picks, "#69f0ae",
                  "Each pick survives a 10pp overconfidence stress test — safe for "
