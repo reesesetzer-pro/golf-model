@@ -416,9 +416,11 @@ def _golf_weather_for_event(event):
         from weather import fetch_forecast, golf_scoring_multiplier
     except Exception:
         return None
-    # Crude location → coords via cache; falls back to skipping if not pre-mapped
+    # Crude location → coords via cache; falls back to skipping if not pre-mapped.
+    # Rotating-host majors are kept in the table with (None, None) placeholder
+    # so we know about them but haven't filled in coords yet — treat as unmapped.
     coords = _GOLF_COURSE_COORDS.get(event.get("event_name", ""))
-    if not coords:
+    if not coords or coords[0] is None or coords[1] is None:
         return {"unmapped": True, "location": location,
                 "event_name": event.get("event_name", "")}
     from datetime import datetime as _dt, timedelta as _td
