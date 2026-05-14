@@ -1172,8 +1172,8 @@ def _render_must_take():
         best_odds = max(valid.values())
         best_book = max(valid, key=valid.get)
         rec = _play_recommendation(dg, best_odds)
-        if rec["tier"] in ("skip", "light"):
-            continue  # MUST TAKE is for strong-conviction picks only
+        if rec["tier"] == "skip":
+            continue  # Negative EV vs current price — filter
         must_picks.append({
             "name": name, "opp": opp, "rnd": m.get("round_num", 0),
             "dg": dg, "valid": valid, "best_odds": best_odds, "best_book": best_book,
@@ -1184,6 +1184,7 @@ def _render_must_take():
 
     parlay_picks = [p for p in must_picks if p["rec"]["tier"] == "parlay"]
     single_picks = [p for p in must_picks if p["rec"]["tier"] == "single"]
+    light_picks  = [p for p in must_picks if p["rec"]["tier"] == "light"]
 
     # ─── Render each tier ───────────────────────────────────────────────────
     def _odds_str(v):
@@ -1244,7 +1245,10 @@ def _render_must_take():
                  "2-leg parlays at half-unit. Avoid 3+ leg golf parlays until grader "
                  "has 30+ settled bets to verify DG calibration.")
     _render_tier("🎯 SINGLE-ONLY (high-EV solo)", single_picks, "#ffcc02",
-                 "Strong +EV as singles but the parlay stress-test fails — don't combine.")
+                 "Strong +EV as singles (≥5%) but the parlay stress-test fails — don't combine.")
+    _render_tier("⚠ LIGHT SIZE (marginal +EV)", light_picks, "#ff9800",
+                 "Marginal positive EV (0-5%) — half-unit max. Books are pricing these "
+                 "close to fair value. Take only if you like the matchup independent of the model.")
 
     # Top 2-leg parlay suggestion
     if len(parlay_picks) >= 2:
