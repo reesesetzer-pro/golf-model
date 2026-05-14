@@ -1232,11 +1232,65 @@ def _render_must_take():
                 </div>
             """, unsafe_allow_html=True)
 
+    # ── Fallback when nothing passes +EV: surface BEST AVAILABLE ─────────────
+    # Always show *something* so the page isn't empty on sharp-pricing nights.
+    # Best Available = top 3 by DG win prob from picks that cleared the gate
+    # but failed the +EV filter (book has priced sharper than the model).
+    fallback_picks = []
     if not must_picks:
+        for m in (matchups or []):
+            p1w = (m.get("p1_dg_win_prob") or 0)
+            p2w = (m.get("p2_dg_win_prob") or 0)
+            if p1w >= p2w:
+                prefix, name, opp, dg = "p1", m.get("p1_name",""), m.get("p2_name",""), p1w
+            else:
+                prefix, name, opp, dg = "p2", m.get("p2_name",""), m.get("p1_name",""), p2w
+            if dg * 100 < gate:
+                continue
+            approved = {
+                "DK":  m.get(f"{prefix}_draftkings"), "FD":  m.get(f"{prefix}_fanduel"),
+                "MGM": m.get(f"{prefix}_betmgm"),     "CSR": m.get(f"{prefix}_caesars"),
+                "B365":m.get(f"{prefix}_bet365"),     "SCR": m.get(f"{prefix}_thescore"),
+                "HR":  m.get(f"{prefix}_hardrock"),
+            }
+            valid = {k: v for k, v in approved.items() if v not in (None, 0)}
+            if not valid:
+                continue
+            best_odds = max(valid.values())
+            best_book = max(valid, key=valid.get)
+            fallback_picks.append({
+                "name": name, "opp": opp, "rnd": m.get("round_num", 0),
+                "dg": dg, "valid": valid, "best_odds": best_odds, "best_book": best_book,
+                "rec": {"tier": "fallback",
+                        "badge": "📊 BEST AVAILABLE",
+                        "color": "#90a4ae",
+                        "reasoning": f"Book priced sharp at {best_odds:+d} — single EV negative, but DG still has it as a likely win. Track-only / small size."},
+                "market": m.get("market",""),
+            })
+        fallback_picks.sort(key=lambda x: -x["dg"])
+        fallback_picks = fallback_picks[:3]
+
+        if fallback_picks:
+            st.markdown(f"""
+                <div style="background:#3a2a1a;border-left:4px solid #ff9800;
+                            border-radius:8px;padding:12px 16px;margin-bottom:14px;">
+                    <div style="color:#ff9800;font-weight:700;font-size:13px;letter-spacing:1px;">
+                        ⚠ FALLBACK TIER — NO +EV PICKS TONIGHT
+                    </div>
+                    <div style="color:#ddd;font-size:12px;margin-top:4px;">
+                        Books have priced this slate sharply — no H2H survives our +EV filter
+                        after vig. Below are the top 3 by DG win probability anyway, for context.
+                        <strong>These are not recommended bets at current prices.</strong>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            _render_tier("📊 BEST AVAILABLE (track-only)", fallback_picks, "#90a4ae",
+                         "Top 3 by DG win prob that fail the +EV filter. Skip or track-only.")
+            return
+        # No picks even cleared the gate
         st.warning(
-            "🚫 **No Must-Take picks tonight.** No H2H matchups passed both the "
-            f"{gate}% adaptive gate AND the 10pp overconfidence stress test. "
-            "Sit it out — or check the ⚔️ H2H tab for softer plays at your own risk."
+            "🚫 **No Must-Take picks tonight.** No H2H matchups even passed the "
+            f"{gate}% adaptive gate. Sit it out."
         )
         return
 
