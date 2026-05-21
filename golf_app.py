@@ -1097,6 +1097,7 @@ def _render_must_take():
         _cc = None
     settled_count = 0
     h2h_roi = None
+    h2h_settled = []
     try:
         sb_client = get_supabase()
         bets_raw = sb_client.table("bets").select(
@@ -1112,11 +1113,23 @@ def _render_must_take():
     except Exception:
         pass
 
+    # Sample-size gate (universal across all models): if fewer than 20 settled
+    # H2H bets, the lifetime ROI is too noisy to lean on — force the strictest
+    # gate (DG ≥65%) so only the most defensible picks surface until the sample
+    # matures.
+    MIN_SAMPLE_N = 20
+    h2h_settled_n = len(h2h_settled)
+    thin_sample = h2h_settled_n < MIN_SAMPLE_N
+
     # Adaptive gate label
     base_gate = 55
     gate = 65 if (h2h_roi is not None and h2h_roi < -15) else base_gate
+    if thin_sample:
+        gate = max(gate, 65)  # force tight gate when sample too small to trust
     gate_status = ("🟥 tight (+10pp)" if gate == 65 else
                    "🟧 watch (+3pp)" if gate == 58 else "🟢 base")
+    if thin_sample:
+        gate_status += f" · 🚧 thin sample (n={h2h_settled_n} < {MIN_SAMPLE_N})"
 
     st.markdown(f"""
         <div style="background:#1a1a2a; padding:14px 18px; border-radius:8px;
