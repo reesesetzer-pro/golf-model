@@ -827,8 +827,8 @@ SHADOW_MARKER = "[AUTO_SHADOW]"
 
 
 def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
-    """For every matchup currently in matchup_odds, log the higher-DG-prob
-    side as a SHADOW pick if it has positive edge vs the best book price.
+    """For every matchup in the CURRENT event, log the higher-DG-prob side
+    as a SHADOW pick if it has positive edge vs the best book price.
 
     These rows go into `bets` with stake=0 so they never affect real P&L,
     but grade_bets.py picks them up the same way as real H2H bets — so the
@@ -838,20 +838,32 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
 
     Idempotent: dedupes against existing shadow rows for the same
     (event, round, p1, p2) tuple.
+
+    BUGFIX 2026-05-29: previously pulled 2000 most-recent matchup_odds
+    rows across all events and tagged them with the current event name,
+    which created phantom Masters/Truist players "playing" the current
+    tournament. The grader correctly couldn't settle them. Fixed by
+    filtering matchup_odds to current event_id only.
     """
-    # Pull latest unique matchups
+    # Resolve current event first — we need its id to filter matchups and
+    # its name for the notes tag.
+    field = dg_get("field-updates", {"tour": "pga"}) or {}
+    event_name = field.get("event_name", "Unknown")
+    current_event_id = str(field.get("event_id") or "")
+    if not current_event_id:
+        log.warning("  shadow_log: no current event_id available — skipping")
+        return 0
+
+    # Pull matchups for THIS event only
     res = (supabase.table("matchup_odds")
            .select("event_id,market,round_num,p1_name,p2_name,"
                    "p1_dg_win_prob,p2_dg_win_prob,"
                    "p1_best_odds,p1_best_book,p2_best_odds,p2_best_book")
+           .eq("event_id", current_event_id)
            .order("updated_at", desc=True).limit(2000).execute().data) or []
     if not res:
-        log.info("  shadow_log: no matchups to process")
+        log.info(f"  shadow_log: no matchups for event {current_event_id} ({event_name})")
         return 0
-
-    # Get current event name for the notes tag
-    field = dg_get("field-updates", {"tour": "pga"}) or {}
-    event_name = field.get("event_name", "Unknown")
 
     # Pull existing shadow rows to dedupe
     existing = (supabase.table("bets")
