@@ -322,7 +322,13 @@ SHARP_THRESHOLDS = {
     "top_10":   3.5,
     "top_20":   4.0,
     "make_cut": 5.0,
-    "matchup":  2.0,
+    # H2H matchup threshold raised 2026-05-28 from 2.0 → 5.0. The lifetime
+    # 3-7-2 / -40% ROI on n=12 picks at +2-5% edges shows DataGolf's prob
+    # is within its own noise margin at small edges — the model can't claim
+    # signal under ~5pp on H2H. Books employ sharp golf modelers; H2H
+    # markets are notoriously hard to beat. Tighter filter forces real,
+    # statistically-defensible picks.
+    "matchup":  5.0,
 }
 
 PRED_LABELS = {"🔥🔥 STRONG": "📈 HIGH", "🔥 SHARP": "📊 MED", "✅ VALUE": "📉 LOW"}
@@ -1157,6 +1163,17 @@ def _render_must_take():
             </div>
         </div>
     """, unsafe_allow_html=True)
+    if thin_sample:
+        st.warning(
+            "🚧 **Honesty banner:** Golf H2H is one of the hardest markets to beat — "
+            "books employ sharp golf modelers and DataGolf's prob is within its own "
+            "noise margin at small (<5pp) edges. With only "
+            f"**n={h2h_settled_n} settled H2H bets** (-{abs(h2h_roi or 0):.0f}% ROI), "
+            "the model can't yet claim demonstrated edge. Picks below are filtered "
+            "through the strict 65% DG gate + 5pp matchup edge floor — only the "
+            "most statistically-defensible candidates surface. Stakes should be "
+            "small until the sample matures."
+        )
 
     # ─── Gather H2H picks above the adaptive gate ────────────────────────────
     must_picks = []
