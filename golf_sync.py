@@ -818,6 +818,123 @@ def sync_finish_odds(tour: str = "pga"):
         time.sleep(0.5)
 
 
+# ── Shadow logging ────────────────────────────────────────────────────────────
+# Marker that distinguishes auto-logged "what the model surfaced" picks from
+# real placed bets. Carried in the `notes` field of the bets table. The
+# dashboard + calibration views filter on this so shadow picks build the
+# learning sample without polluting real-stake P&L.
+SHADOW_MARKER = "[AUTO_SHADOW]"
+
+
+def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
+    """For every matchup currently in matchup_odds, log the higher-DG-prob
+    side as a SHADOW pick if it has positive edge vs the best book price.
+
+    These rows go into `bets` with stake=0 so they never affect real P&L,
+    but grade_bets.py picks them up the same way as real H2H bets — so the
+    calibration sample grows by ~50-100 picks per tournament instead of
+    waiting for the user to manually log every bet (which is how we ended
+    up at n=12 lifetime).
+
+    Idempotent: dedupes against existing shadow rows for the same
+    (event, round, p1, p2) tuple.
+    """
+    # Pull latest unique matchups
+    res = (supabase.table("matchup_odds")
+           .select("event_id,market,round_num,p1_name,p2_name,"
+                   "p1_dg_win_prob,p2_dg_win_prob,"
+                   "p1_best_odds,p1_best_book,p2_best_odds,p2_best_book")
+           .order("updated_at", desc=True).limit(2000).execute().data) or []
+    if not res:
+        log.info("  shadow_log: no matchups to process")
+        return 0
+
+    # Get current event name for the notes tag
+    field = dg_get("field-updates", {"tour": "pga"}) or {}
+    event_name = field.get("event_name", "Unknown")
+
+    # Pull existing shadow rows to dedupe
+    existing = (supabase.table("bets")
+                .select("notes").ilike("notes", f"%{SHADOW_MARKER}%")
+                .execute().data) or []
+    existing_keys = set()
+    for r in existing:
+        n = r.get("notes") or ""
+        # Key format embedded in notes: SHADOW_KEY=event|round|p1|p2
+        for tag in n.split():
+            if tag.startswith("SHADOW_KEY="):
+                existing_keys.add(tag.split("=", 1)[1])
+
+    def _american_to_implied(o):
+        try:
+            o = float(o)
+            return (100 / (o + 100)) if o > 0 else (abs(o) / (abs(o) + 100))
+        except Exception:
+            return None
+
+    def _pnl_unit(odds, result):
+        if result == "Pending" or result == "Push" or not odds:
+            return 0.0
+        try:
+            o = float(odds)
+        except Exception:
+            return 0.0
+        if result == "Win":
+            return (o / 100.0) if o > 0 else (100.0 / abs(o))
+        return -1.0
+
+    logged = 0
+    for m in res:
+        for side in ("p1", "p2"):
+            other = "p2" if side == "p1" else "p1"
+            player = m.get(f"{side}_name")
+            opponent = m.get(f"{other}_name")
+            dg_p = m.get(f"{side}_dg_win_prob")
+            book_odds = m.get(f"{side}_best_odds")
+            book = m.get(f"{side}_best_book")
+            if not (player and opponent and dg_p and book_odds and book):
+                continue
+            book_p = _american_to_implied(book_odds)
+            if book_p is None:
+                continue
+            edge_pp = (float(dg_p) - book_p) * 100
+            if edge_pp <= min_edge_pp:
+                continue
+            # Dedup key: event|round|p1|p2 (player picked + opponent)
+            key = f"{m.get('event_id')}|{m.get('round_num')}|{player}|{opponent}"
+            if key in existing_keys:
+                continue
+
+            # Stake=0 means "shadow only — does not affect real P&L"
+            note = (f"{SHADOW_MARKER} [{event_name}] vs {opponent} | "
+                    f"DG: {float(dg_p)*100:.1f}% | Book: {book_p*100:.1f}% | "
+                    f"SHADOW_KEY={key}")
+            try:
+                supabase.table("bets").insert({
+                    "player_name":  player,
+                    "market":       "H2H",
+                    "side":         f"{player} H2H",
+                    "book":         book,
+                    "odds":         int(float(book_odds)),
+                    "stake":        0,
+                    "to_win":       0,
+                    "implied_prob": round(book_p * 100, 2),
+                    "edge_at_bet":  round(edge_pp, 2),
+                    "round":        f"R{m.get('round_num')}",
+                    "notes":        note,
+                    "result":       "Pending",
+                    "profit_loss":  0.0,
+                    "logged_at":    now_utc(),
+                }).execute()
+                logged += 1
+                existing_keys.add(key)
+            except Exception as e:
+                log.warning(f"  shadow_log insert failed: {e}")
+
+    log.info(f"✓  shadow_logged H2H picks  — {logged} new (edge ≥ {min_edge_pp:.1f}pp)")
+    return logged
+
+
 def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
     log.info(f"Syncing DG matchup odds ({tour} / {market})...")
     data = dg_get("betting-tools/matchups", {
@@ -1122,6 +1239,9 @@ def full_sync():
     sync_historical_odds(year=2026)
     sync_historical_odds(year=2025)
     sync_book_odds()
+    # Shadow-log every H2H matchup with positive DG edge so calibration has
+    # real volume to learn from, not just the user's 12 manually-placed bets.
+    shadow_log_matchups(min_edge_pp=0.0)
     sync_model_snapshot()   # persist calibration + market ROI after all bets settle
     log.info("━━━  FULL SYNC COMPLETE  ━━━")
 
@@ -1134,6 +1254,7 @@ def live_sync():
     sync_odds_api_to_finish_odds()
     sync_matchup_odds()
     sync_book_odds()
+    shadow_log_matchups(min_edge_pp=0.0)
     log.info("━━━  LIVE SYNC COMPLETE  ━━━")
 
 
@@ -1148,6 +1269,7 @@ def pre_sync():
     sync_matchup_odds(market="tournament_matchups")
     sync_matchup_odds(market="round_matchups")
     sync_book_odds()
+    shadow_log_matchups(min_edge_pp=0.0)
     log.info("━━━  PRE-TOURNAMENT SYNC COMPLETE  ━━━")
 
 
