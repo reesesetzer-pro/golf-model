@@ -61,11 +61,16 @@ def find_event(tournament_name: str, bet_date_iso: str) -> Optional[dict]:
 _round_cache: dict = {}
 
 
-def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, int]:
-    """Return {player_name: total_score_to_par_or_strokes}.
+def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, dict]:
+    """Return {player_name: {"total": int, "r1": int|None, "r2": ..., "r3": ..., "r4": ...}}.
 
     Players who missed the cut are returned with their available round totals.
     Players with no scores are excluded (treated as missing).
+
+    BUGFIX 2026-05-31: previously returned only summed totals. Round-specific
+    H2H matchups (e.g. R2 of Charles Schwab Challenge) need per-round scores
+    so we compare R2 strokes head-to-head, not R1+R2 totals. Now returns the
+    per-round breakdown alongside the cumulative total.
     """
     cache_key = (tour, str(event_id), year)
     if cache_key in _round_cache:
@@ -89,27 +94,33 @@ def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, i
                 return {}
             time.sleep(5)
 
-    totals: dict[str, int] = {}
+    scores: dict[str, dict] = {}
     for p in data.get("scores", []):
         name = p.get("player_name")
         if not name:
             continue
+        per_round = {}
         total = 0
         any_round = False
-        for r_key in ("round_1", "round_2", "round_3", "round_4"):
+        for ridx, r_key in enumerate(("round_1", "round_2", "round_3", "round_4"), start=1):
             rd = p.get(r_key)
             if rd and isinstance(rd, dict) and rd.get("score") is not None:
                 try:
-                    total += int(rd["score"])
+                    s = int(rd["score"])
+                    per_round[f"r{ridx}"] = s
+                    total += s
                     any_round = True
                 except (TypeError, ValueError):
-                    pass
+                    per_round[f"r{ridx}"] = None
+            else:
+                per_round[f"r{ridx}"] = None
         if any_round:
-            totals[name] = total
+            per_round["total"] = total
+            scores[name] = per_round
 
-    _round_cache[cache_key] = totals
-    print(f"  · cached {len(totals)} player totals for {tour}/{event_id}/{year}")
-    return totals
+    _round_cache[cache_key] = scores
+    print(f"  · cached {len(scores)} player rounds for {tour}/{event_id}/{year}")
+    return scores
 
 
 # ── Bet grading ───────────────────────────────────────────────────────────────
@@ -167,14 +178,36 @@ def grade_one(bet: dict) -> Optional[str]:
         tour = evt.get("tour", "pga")
         eid  = evt.get("event_id")
         year = int(evt.get("season") or bet_date[:4])
-        totals = fetch_event_rounds(tour, eid, year)
+        scores = fetch_event_rounds(tour, eid, year)
 
-        p_score = totals.get(player)
-        o_score = totals.get(opponent)
+        # Determine which score to compare:
+        #   - Round-specific matchup (bet.round = "R1"/"R2"/"R3"/"R4") → that
+        #     round's score only (e.g. R2 H2H bets compare round_2 strokes,
+        #     not cumulative R1+R2 totals).
+        #   - Tournament matchup / no round info / "Live" → full event total.
+        # This fixes the bug where round_matchups H2H bets graded against
+        # cumulative totals, not the actual round they were bet on.
+        round_field = str(bet.get("round") or "").strip().lower()
+        score_key = "total"
+        if round_field in ("r1", "round_1"): score_key = "r1"
+        elif round_field in ("r2", "round_2"): score_key = "r2"
+        elif round_field in ("r3", "round_3"): score_key = "r3"
+        elif round_field in ("r4", "round_4"): score_key = "r4"
+
+        p_record = scores.get(player) or {}
+        o_record = scores.get(opponent) or {}
+        p_score = p_record.get(score_key)
+        o_score = o_record.get(score_key)
 
         # Missed cut handling: a player not in totals never made the cut → effectively a higher score
         if p_score is None and o_score is None:
-            print(f"  bet {bet['id']}: neither {player} nor {opponent} found in event totals")
+            # For round-specific bets, also try total as fallback (helps when
+            # the requested round hasn't been played yet — return None to
+            # leave Pending rather than mis-grading).
+            if score_key != "total" and not p_record and not o_record:
+                print(f"  bet {bet['id']}: neither {player} nor {opponent} in event totals")
+                return None
+            print(f"  bet {bet['id']}: no {score_key} score for {player} or {opponent}")
             return None
         if p_score is None:
             return "Loss"
