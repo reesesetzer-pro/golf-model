@@ -17,7 +17,7 @@ import re
 import time
 import requests
 from typing import Optional
-from supabase import create_client
+from supabase import create_client, ClientOptions
 
 
 # ── Secrets ───────────────────────────────────────────────────────────────────
@@ -40,14 +40,30 @@ SUPABASE_URL, SUPABASE_KEY = _load_secrets()
 DG_KEY = _dg_key()
 DG_BASE = "https://feeds.datagolf.com"
 
-sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+# 60s postgrest timeout (default was too short for a slow Supabase) + the schedule
+# cache below stop golf-grade's ReadTimeout: find_event was re-fetching the FULL
+# schedule table once per pending bet (~280x/run). Now fetched once.
+sb = create_client(SUPABASE_URL, SUPABASE_KEY,
+                   options=ClientOptions(postgrest_client_timeout=60))
 
 
 # ── Tournament/event resolution ───────────────────────────────────────────────
+_SCHEDULE_CACHE = None
+
+
+def _schedule() -> list:
+    """The schedule table, fetched ONCE per run (was re-fetched on every find_event call,
+    i.e. per pending bet — the ReadTimeout culprit)."""
+    global _SCHEDULE_CACHE
+    if _SCHEDULE_CACHE is None:
+        _SCHEDULE_CACHE = sb.table("schedule").select("*").execute().data or []
+    return _SCHEDULE_CACHE
+
+
 def find_event(tournament_name: str, bet_date_iso: str) -> Optional[dict]:
     """Look up event_id from the schedule table by name + year (year inferred from bet date)."""
     year = int(bet_date_iso[:4])
-    rows = sb.table("schedule").select("*").execute().data or []
+    rows = _schedule()
     # Exact name match in same year, prefer that; else partial match
     cand = [r for r in rows if str(r.get("event_name", "")).strip() == tournament_name.strip() and r.get("season") == year]
     if not cand:
