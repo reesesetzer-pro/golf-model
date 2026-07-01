@@ -865,10 +865,22 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
         log.info(f"  shadow_log: no matchups for event {current_event_id} ({event_name})")
         return 0
 
-    # Pull existing shadow rows to dedupe
-    existing = (supabase.table("bets")
-                .select("notes").ilike("notes", f"%{SHADOW_MARKER}%")
-                .execute().data) or []
+    # Pull existing shadow rows to dedupe. Paginated: a plain .select() caps at
+    # Postgrest's default 1000-row page, and the shadow ledger passed that a
+    # while ago (1305 rows as of 2026-07) — an unpaginated fetch silently missed
+    # the newest keys and re-logged the same matchups night after night.
+    existing = []
+    page = 1000
+    start = 0
+    while True:
+        batch = (supabase.table("bets")
+                 .select("notes").ilike("notes", f"%{SHADOW_MARKER}%")
+                 .range(start, start + page - 1)
+                 .execute().data) or []
+        existing.extend(batch)
+        if len(batch) < page:
+            break
+        start += page
     existing_keys = set()
     for r in existing:
         n = r.get("notes") or ""
