@@ -884,10 +884,15 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
     existing_keys = set()
     for r in existing:
         n = r.get("notes") or ""
-        # Key format embedded in notes: SHADOW_KEY=event|round|p1|p2
-        for tag in n.split():
-            if tag.startswith("SHADOW_KEY="):
-                existing_keys.add(tag.split("=", 1)[1])
+        # Key format embedded in notes: SHADOW_KEY=event|round|p1|p2. SHADOW_KEY=
+        # is always the LAST field in the note (see the f-string below), so split
+        # on the marker itself and take everything after it as the key. A plain
+        # whitespace .split() truncates at the first space INSIDE the key (every
+        # golf name is "Last, First" — e.g. "Grillo, Emiliano" — so almost every
+        # key has one), which silently broke dedup for any matchup with such a
+        # name and re-logged it on every run despite the pagination fix above.
+        if "SHADOW_KEY=" in n:
+            existing_keys.add(n.split("SHADOW_KEY=", 1)[1].strip())
 
     def _american_to_implied(o):
         try:
@@ -1048,14 +1053,20 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
             "updated_at":      now_utc(),
         }
         rows.append(row)
+    ok = 0
     for row in rows:
         try:
             supabase.table("matchup_odds").upsert(
                 row, on_conflict="event_id,market,round_num,p1_dg_id,p2_dg_id"
             ).execute()
-        except Exception:
-            pass
-    log.info(f"✓  {'matchup_odds':25s} — {len(rows)} rows upserted")
+            ok += 1
+        except Exception as e:
+            # A per-row failure (e.g. a null p1_dg_id/p2_dg_id -- part of the
+            # on_conflict key -- or a transient Supabase error) used to vanish
+            # silently while the log below still claimed every row landed.
+            log.warning(f"  matchup_odds upsert failed for {row.get('p1_name')} vs "
+                        f"{row.get('p2_name')}: {e}")
+    log.info(f"✓  {'matchup_odds':25s} — {ok}/{len(rows)} rows upserted")
 
 
 def sync_historical_odds(tour: str = "pga", year: int = 2026,
@@ -1092,10 +1103,24 @@ def sync_historical_odds(tour: str = "pga", year: int = 2026,
         time.sleep(0.5)
 
 
+_NAME_SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
+
+
 def _normalize_name(name: str) -> str:
-    """Convert 'First Last' to 'Last, First' to match DataGolf format."""
+    """Convert 'First Last' to 'Last, First' to match DataGolf format.
+
+    Generational suffixes (Jr/Sr/II/III/IV) must stay attached to the surname
+    -- DataGolf's own skill_ratings stores these as e.g. "Howell III, Charles"
+    (verified live), not "III, Charles Howell". A blind last-token split put
+    the suffix alone in the surname slot, so name_to_dgid lookups for every
+    suffixed player (Charles Howell III, Harold Varner III, Frankie Capan III
+    among current PGA Tour players) missed and their book lines were silently
+    dropped from finish_odds.
+    """
     if not name: return ""
     parts = name.strip().split()
+    if len(parts) >= 3 and parts[-1].strip(".").lower() in _NAME_SUFFIXES:
+        return f"{parts[-2]} {parts[-1]}, {' '.join(parts[:-2])}"
     if len(parts) >= 2:
         return f"{parts[-1]}, {' '.join(parts[:-1])}"
     return name

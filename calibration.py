@@ -14,6 +14,8 @@ import json
 import pandas as pd
 from supabase import create_client
 
+from golf_db import fetch_all
+
 
 def _load_secrets():
     with open("golf_secrets.toml") as f:
@@ -54,9 +56,7 @@ def load_calibration_lookup(min_n: int = 5) -> dict:
     """Returns {(market, bucket): actual_hit_rate} for buckets with ≥min_n settled."""
     url, key = _load_secrets()
     sb = create_client(url, key)
-    rows = (sb.table("bets").select("*")
-            .in_("result", ["Win", "Loss"])
-            .execute()).data or []
+    rows = fetch_all(lambda: sb.table("bets").select("*").in_("result", ["Win", "Loss"]))
     if not rows:
         return {}
     df = pd.DataFrame(rows)
@@ -75,6 +75,19 @@ def load_calibration_lookup(min_n: int = 5) -> dict:
 
 
 def calibrate_prob(raw_prob: float, market: str, lookup: dict) -> float:
+    """DEAD CODE as of 2026-07-01 -- not imported by picks_today.py,
+    must_picks_feed.py, or golf_app.py (which has its own separate,
+    documented-display-only _compute_learning_engine). Confirmed unused via
+    grep, not a live path.
+
+    Also currently NON-FUNCTIONAL even if wired in: `lookup` is keyed by
+    bets.market values ("H2H", "H2H R1", ...) from load_calibration_lookup(),
+    but a real caller would pass picks_today's market vocabulary
+    ("round_matchups"/"tournament_matchups") -- the two never overlap, so
+    every call would silently fall through to `return raw_prob` below (no
+    calibration applied, no error). Fix the vocabulary mismatch before ever
+    wiring this in for real.
+    """
     if raw_prob is None or raw_prob != raw_prob:
         return raw_prob
     bucket = _bucket(raw_prob)

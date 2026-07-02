@@ -19,6 +19,8 @@ import requests
 from typing import Optional
 from supabase import create_client, ClientOptions
 
+from golf_db import fetch_all
+
 
 # ── Secrets ───────────────────────────────────────────────────────────────────
 def _load_secrets():
@@ -98,6 +100,14 @@ def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, d
         try:
             r = requests.get(url, params=params, timeout=20)
             if r.status_code == 429:
+                if attempt == 2:
+                    # Exhausted retries on repeated rate-limiting: without this,
+                    # the loop ends without ever assigning `data`, and the code
+                    # below crashes with UnboundLocalError instead of leaving
+                    # the event pending like every other failure path does.
+                    print(f"  ! DG rounds fetch failed for event={event_id}: rate limited (429) after 3 attempts")
+                    _round_cache[cache_key] = {}
+                    return {}
                 time.sleep(60 if attempt == 0 else 120)
                 continue
             r.raise_for_status()
@@ -140,26 +150,31 @@ def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, d
 
 
 # ── Bet grading ───────────────────────────────────────────────────────────────
+# Shared by parse_h2h AND the outright-Win block below — they parse the same
+# "[Tournament Name]" tag out of `notes` and both need to recognize real PGA
+# event names. These used to be two separately-maintained lists; the outright
+# one was a stale, much shorter copy (missing Sentry/American Express/Charles
+# Schwab/FedEx/RBC/Wyndham/BMW/etc.), so outright Win bets on those events
+# never matched and stayed Pending forever. One list now, used by both.
+_TOURNAMENT_KW = (
+    "Masters", "Open", "Championship", "Classic", "Invitational", "Tournament",
+    "Heritage", "Pebble", "Texas", "Memorial", "Players", "Genesis",
+    "Challenge", "Cup", "Pro-Am", "Schwab", "FedEx", "Travelers", "Wells Fargo",
+    "AT&T", "Sentry", "Sony", "American Express", "Farmers", "Phoenix",
+    "Honda", "Cognizant", "RBC", "Valspar", "Valero", "Arnold Palmer",
+    "Mexico", "WGC", "WM", "Wyndham", "BMW", "Tour Championship",
+    "Mayakoba", "Houston", "Charles Schwab",
+)
+
+
 def parse_h2h(bet: dict) -> Optional[tuple[str, str, str]]:
     """Return (tournament_name, player_name, opponent_name) or None."""
     notes = bet.get("notes") or ""
     tags = re.findall(r"\[([^\]]+)\]", notes)
     # AUTO_SHADOW is our shadow-pick marker tag — never the tournament. Strip it
-    # before matching. Also broadened the tournament-keyword list to cover the
-    # common PGA event suffixes that were missing (Challenge, Cup, Pro-Am,
-    # Schwab, FedEx, Travelers, Wells Fargo, etc.) so AUTO_SHADOW rows can
-    # actually grade.
+    # before matching.
     tags = [t for t in tags if t != "AUTO_SHADOW"]
-    _KW = (
-        "Masters", "Open", "Championship", "Classic", "Invitational", "Tournament",
-        "Heritage", "Pebble", "Texas", "Memorial", "Players", "Genesis",
-        "Challenge", "Cup", "Pro-Am", "Schwab", "FedEx", "Travelers", "Wells Fargo",
-        "AT&T", "Sentry", "Sony", "American Express", "Farmers", "Phoenix",
-        "Honda", "Cognizant", "RBC", "Valspar", "Valero", "Arnold Palmer",
-        "Mexico", "WGC", "WM", "Wyndham", "BMW", "Tour Championship",
-        "Mayakoba", "Houston", "Charles Schwab",
-    )
-    tournament = next((t for t in tags if any(k in t for k in _KW)), None)
+    tournament = next((t for t in tags if any(k in t for k in _TOURNAMENT_KW)), None)
     if not tournament:
         return None
     # opponent: "... vs Garcia, Sergio | DG: 65.2% | Book: 60.6%"
@@ -229,6 +244,21 @@ def grade_one(bet: dict) -> Optional[str]:
             return "Loss"
         if o_score is None:
             return "Win"
+        # Tournament-total comparisons: a missed-cut (or WD) player's `total`
+        # is only a PARTIAL score (e.g. 2 rounds), which can be numerically
+        # LOWER than a made-cut player's full 4-round total even though
+        # missing the cut should always be the worse outcome ("missed-cut
+        # counts as worst", per this file's own docstring) — comparing the
+        # raw totals directly let a missed-cut player win on paper. Detect an
+        # incomplete tournament via missing r3/r4 and force that side to Loss
+        # before falling back to a raw total comparison (which still applies
+        # correctly when BOTH players missed the cut, comparing like-for-like
+        # partial totals through the same number of rounds).
+        if score_key == "total":
+            p_made_cut = p_record.get("r3") is not None and p_record.get("r4") is not None
+            o_made_cut = o_record.get("r3") is not None and o_record.get("r4") is not None
+            if p_made_cut != o_made_cut:
+                return "Win" if p_made_cut else "Loss"
         if p_score < o_score:
             return "Win"
         if p_score > o_score:
@@ -239,9 +269,7 @@ def grade_one(bet: dict) -> Optional[str]:
     if market in ("WIN", "OUTRIGHT", "TOURNAMENT WIN"):
         notes = bet.get("notes") or ""
         tags = re.findall(r"\[([^\]]+)\]", notes)
-        tournament = next((t for t in tags if any(k in t for k in
-            ("Masters", "Open", "Championship", "Classic", "Invitational",
-             "Tournament", "Heritage", "Pebble", "Texas", "Memorial", "Players"))), None)
+        tournament = next((t for t in tags if any(k in t for k in _TOURNAMENT_KW)), None)
         if not tournament:
             return None
         evt = find_event(tournament, bet_date)
@@ -256,7 +284,7 @@ def grade_one(bet: dict) -> Optional[str]:
 
 
 def main():
-    pending = sb.table("bets").select("*").eq("result", "Pending").execute().data or []
+    pending = fetch_all(lambda: sb.table("bets").select("*").eq("result", "Pending"))
     print(f"Pending bets: {len(pending)}")
 
     graded = updated = 0

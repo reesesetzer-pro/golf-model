@@ -8,6 +8,7 @@ import re
 import streamlit as st
 import pandas as pd
 from supabase import create_client
+from golf_db import fetch_all
 from datetime import datetime, timezone, timedelta
 
 def now_et():
@@ -16,8 +17,16 @@ def now_et():
     et_now = utc_now - timedelta(hours=4)
     return et_now.strftime("%I:%M %p ET")
 
-def quick_log_bet(player, market, book, odds, edge, stake=10.0, notes="", event=""):
-    """One-click bet logging from any sharp play list."""
+def quick_log_bet(player, market, book, odds, edge, stake=10.0, notes="", event="", bet_round="Live"):
+    """One-click bet logging from any sharp play list.
+
+    `bet_round` defaults to "Live" for genuinely round-agnostic bets (Win/Top5/
+    finish-position). Round-SPECIFIC H2H matchups (e.g. R2 of a tournament)
+    must pass the real round (e.g. "R2") -- grade_bets.py's round-aware
+    grading only detects r1-r4 patterns, so a hardcoded "Live" here silently
+    made every round-specific bet grade against the full tournament total
+    instead of the actual round the user bet on.
+    """
     try:
         sb = get_supabase()
         o   = float(odds)
@@ -34,7 +43,7 @@ def quick_log_bet(player, market, book, odds, edge, stake=10.0, notes="", event=
             "to_win":       win,
             "implied_prob": imp,
             "edge_at_bet":  round(edge, 2),
-            "round":        "Live",
+            "round":        bet_round,
             "notes":        f"[{tier}] [{event}] {notes}",
             "result":       "Pending",
             "profit_loss":  0.0,
@@ -269,11 +278,15 @@ def get_supabase():
 @st.cache_data(ttl=300)  # cache 5 min
 def load_data():
     sb = get_supabase()
-    skill      = sb.table("skill_ratings").select("*").order("dg_rank").execute().data
-    field      = sb.table("field").select("*").execute().data
-    preds      = sb.table("predictions").select("*").execute().data
-    live_preds = sb.table("live_predictions").select("*").execute().data
-    fin_odds_raw = sb.table("finish_odds").select("*").order("updated_at", desc=True).execute().data
+    # Paginated past Postgrest's default 1000-row page cap -- field has 1505+
+    # rows with no ORDER BY, so an unpaginated select silently dropped a
+    # storage-order-dependent slice, sometimes shrinking the live tournament's
+    # own field on the dashboard. `rounds` keeps its explicit .limit(25000).
+    skill      = fetch_all(lambda: sb.table("skill_ratings").select("*").order("dg_rank"))
+    field      = fetch_all(lambda: sb.table("field").select("*"))
+    preds      = fetch_all(lambda: sb.table("predictions").select("*"))
+    live_preds = fetch_all(lambda: sb.table("live_predictions").select("*"))
+    fin_odds_raw = fetch_all(lambda: sb.table("finish_odds").select("*").order("updated_at", desc=True))
     # Deduplicate by (dg_id, market) — keep most recently updated row per player+market
     _seen = set()
     fin_odds = []
@@ -282,9 +295,9 @@ def load_data():
         if key not in _seen:
             _seen.add(key)
             fin_odds.append(r)
-    matchups   = sb.table("matchup_odds").select("*").order("p1_dg_win_prob", desc=True).execute().data
+    matchups   = fetch_all(lambda: sb.table("matchup_odds").select("*").order("p1_dg_win_prob", desc=True))
     rounds     = sb.table("rounds").select("*").order("year", desc=True).limit(25000).execute().data
-    schedule   = sb.table("schedule").select("*").order("start_date", desc=True).execute().data
+    schedule   = fetch_all(lambda: sb.table("schedule").select("*").order("start_date", desc=True))
     return skill, field, preds, live_preds, fin_odds, matchups, rounds, schedule
 
 def edge_tier(e):
@@ -1106,9 +1119,12 @@ def _render_must_take():
     h2h_settled = []
     try:
         sb_client = get_supabase()
-        bets_raw = sb_client.table("bets").select(
+        # Paginated -- this table has 1313+ rows and the adaptive Must-Take
+        # gate below needs the FULL history (especially the newest bets) to
+        # compute a real settled_count/h2h_roi, not a truncated 1000-row slice.
+        bets_raw = fetch_all(lambda: sb_client.table("bets").select(
             "result,profit_loss,stake,market"
-        ).execute().data or []
+        ))
         settled = [b for b in bets_raw if b.get("result") in ("Win","Loss","Push")]
         settled_count = len(settled)
         h2h_settled = [b for b in settled if "H2H" in (b.get("market") or "")]
@@ -1765,12 +1781,14 @@ def _render_best_h2h():
                                     break
                                 except: pass
                         if odds_val:
+                            _rnd = play.get("Round")
                             ok = quick_log_bet(
                                 player=player, market="H2H",
                                 book=book or "Best Available",
                                 odds=odds_val, edge=edge,
                                 stake=stake, event=current_event,
-                                notes=f"vs {opp} | DG: {dg_w:.1f}% | Book: {bk_w:.1f}%"
+                                notes=f"vs {opp} | DG: {dg_w:.1f}% | Book: {bk_w:.1f}%",
+                                bet_round=f"R{_rnd}" if _rnd else "Live",
                             )
                             if ok:
                                 st.success(f"✅ Logged!")
@@ -1910,7 +1928,10 @@ def _render_tracker():
     def load_bets():
         try:
             sb = get_supabase()
-            return sb.table("bets").select("*").order("logged_at", desc=True).execute().data
+            # Paginated -- 1313+ rows in production; every metric on this tab
+            # (Total Bets, Win Rate, P&L, ROI, tier/market/book breakdowns) was
+            # silently computed off only the newest 1000 rows without this.
+            return fetch_all(lambda: sb.table("bets").select("*").order("logged_at", desc=True))
         except:
             return []
 
@@ -2416,7 +2437,14 @@ def _render_tracker():
                 )
                 st.caption("* = provisional (one or both players not yet through 18)")
 
-                confirmable = [r for r in grade_rows if r["data_ok"] and r["proposed"] != "?"]
+                # Exclude PROVISIONAL rows ("*"-suffixed, i.e. both_done=False) —
+                # a mid-round score comparison can flip by the time both players
+                # finish 18. The caption below says "* = provisional" but nothing
+                # actually blocked confirming them: this button would strip the
+                # "*" and write it as a final Win/Loss/Push, permanently wrong if
+                # the leader changed. Only genuinely-finished matchups qualify.
+                confirmable = [r for r in grade_rows
+                               if r["data_ok"] and r["proposed"] != "?" and "*" not in r["proposed"]]
                 if confirmable:
                     if st.button(f"✅ Confirm {len(confirmable)} Grade{'s' if len(confirmable) != 1 else ''}",
                                  type="primary", key="h2h_grade_confirm"):
@@ -2922,7 +2950,14 @@ def _render_best_plays_by_book():
                     dg_imp = american_to_implied(dg_odds) or 0
                     bk_imp = american_to_implied(odds) or 0
                     e = round(dg_imp - bk_imp, 2)
-                    if e < MIN_EDGE: continue
+                    # Gate on the matchup-specific threshold (5%), not the
+                    # generic 3% MIN_EDGE used for other markets -- the flat
+                    # gate let 3-5% H2H plays into this "where to bet today"
+                    # view with no sharp badge, even though this codebase
+                    # deliberately raised H2H's own threshold to 5% off
+                    # documented -40% ROI evidence that DG's edge is
+                    # unreliable below that for matchups specifically.
+                    if e < SHARP_THRESHOLDS.get("matchup", MIN_EDGE): continue
                     _, sv = sharp_value(dg_imp, odds, "matchup")
                     sv_display = f"{sv} +{e:.2f}%" if sv else f"+{e:.2f}%"
                     opp = m.get("p2_name" if side == "p1" else "p1_name", "")
@@ -3150,9 +3185,12 @@ def _render_live_alerts():
     def load_alert_data():
         sb = get_supabase()
         live = sb.table("live_predictions").select("*").order("current_pos").execute().data or []
-        bets = sb.table("bets").select(
+        # Paginated -- calibration buckets, adaptive thresholds, market ROI,
+        # and every live alert's confidence score all need the FULL settled-
+        # bet history, not the first 1000 rows.
+        bets = fetch_all(lambda: sb.table("bets").select(
             "implied_prob,edge_at_bet,result,market,stake,profit_loss"
-        ).execute().data or []
+        ))
         return live, bets
 
     live, all_bets   = load_alert_data()
