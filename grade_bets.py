@@ -283,18 +283,45 @@ def grade_one(bet: dict) -> Optional[str]:
     return None
 
 
+def _closing_clv(bet: dict) -> Optional[float]:
+    """CLV% for a shadow bet vs the last pre-round odds snapshot that
+    golf_sync.py writes to closing_lines.json (keyed by SHADOW_KEY; the bet's
+    player is always the p1 side of its key). None when no snapshot exists —
+    report-only, never blocks grading (the bets table has no closing column)."""
+    import json as _json, os as _os
+    notes = bet.get("notes") or ""
+    if "SHADOW_KEY=" not in notes:
+        return None
+    key = notes.split("SHADOW_KEY=", 1)[1].strip()
+    try:
+        path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "closing_lines.json")
+        close = _json.load(open(path)).get(key, {}).get("p1")
+        bet_odds = float(bet.get("odds") or 0)
+        close = float(close)
+        if not bet_odds or not close:
+            return None
+        dec = lambda a: 1 + (a / 100 if a > 0 else 100 / abs(a))
+        return (dec(bet_odds) / dec(close) - 1) * 100
+    except Exception:
+        return None
+
+
 def main():
     pending = fetch_all(lambda: sb.table("bets").select("*").eq("result", "Pending"))
     print(f"Pending bets: {len(pending)}")
 
     graded = updated = 0
     summary = {"Win": 0, "Loss": 0, "Push": 0}
+    clvs = []
     for bet in pending:
         outcome = grade_one(bet)
         if outcome is None:
             continue
         graded += 1
         summary[outcome] += 1
+        clv = _closing_clv(bet)
+        if clv is not None:
+            clvs.append(clv)
 
         # Compute profit_loss based on American odds + stake
         odds  = float(bet.get("odds") or 0)
@@ -313,7 +340,9 @@ def main():
         updated += 1
         print(f"  ✓ id={bet['id']} {bet.get('player_name')} {bet.get('market')} → {outcome}  (P/L: {pnl:+.2f})")
 
-    print(f"\nGraded {graded}/{len(pending)} | Win/Loss/Push: {summary['Win']}/{summary['Loss']}/{summary['Push']} | Updated {updated} rows")
+    clv_note = (f" | avg CLV {sum(clvs)/len(clvs):+.2f}% (n={len(clvs)})"
+                if clvs else "")
+    print(f"\nGraded {graded}/{len(pending)} | Win/Loss/Push: {summary['Win']}/{summary['Loss']}/{summary['Push']} | Updated {updated} rows{clv_note}")
 
 
 if __name__ == "__main__":

@@ -961,6 +961,36 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
                 log.warning(f"  shadow_log insert failed: {e}")
 
     log.info(f"✓  shadow_logged H2H picks  — {logged} new (edge ≥ {min_edge_pp:.1f}pp)")
+
+    # ── CLOSING-LINE snapshot (CLV source) ───────────────────────────────────
+    # Every sync overwrites the current best price for every matchup of THIS
+    # event into closing_lines.json, keyed by the same SHADOW_KEY the bets
+    # carry. The bets table has no closing column (no REST schema changes), so
+    # this local file is the closing store; the last sync before a round locks
+    # is, by construction, the closing snapshot. grade_bets.py reads it to
+    # report CLV when it settles each bet.
+    try:
+        import json as _json
+        _cl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "closing_lines.json")
+        try:
+            with open(_cl_path) as _f:
+                _cl = _json.load(_f)
+        except Exception:
+            _cl = {}
+        _stamped = 0
+        for m in res:
+            key = f"{m.get('event_id')}|{m.get('round_num')}|{m.get('p1_name')}|{m.get('p2_name')}"
+            p1, p2 = m.get("p1_best_odds"), m.get("p2_best_odds")
+            if p1 is None and p2 is None:
+                continue
+            _cl[key] = {"p1": p1, "p2": p2, "ts": now_utc()}
+            _stamped += 1
+        with open(_cl_path, "w") as _f:
+            _json.dump(_cl, _f)
+        log.info(f"✓  closing_lines snapshot  — {_stamped} matchup(s) stamped")
+    except Exception as e:
+        log.warning(f"  closing_lines snapshot failed: {e}")
     return logged
 
 
