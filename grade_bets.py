@@ -99,6 +99,21 @@ def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, d
     for attempt in range(3):
         try:
             r = requests.get(url, params=params, timeout=20)
+            # DataGolf's historical archive only lists an event AFTER it concludes
+            # (verified 2026-07-05: the exact same event_id/params 200s fine for
+            # older, completed events -- this 400 is specifically "event number
+            # {N} is not available in the {year} {tour} calendar year"). An
+            # in-progress tournament (schedule row has winner='TBD'/end_date=None)
+            # will deterministically 400 here until it wraps and DataGolf backfills
+            # it -- NOT a failure, and retrying won't change the outcome, so fail
+            # fast instead of burning the retry loop and printing an alarming
+            # "fetch failed" that looks identical to a real, unresolvable bug.
+            if r.status_code == 400 and "not available" in r.text.lower():
+                print(f"  · event {event_id} not yet in DataGolf's historical archive "
+                      f"(tournament likely still in progress) — bets stay pending "
+                      f"until it concludes and DataGolf backfills it")
+                _round_cache[cache_key] = {}
+                return {}
             if r.status_code == 429:
                 if attempt == 2:
                     # Exhausted retries on repeated rate-limiting: without this,
@@ -142,7 +157,15 @@ def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, d
                 per_round[f"r{ridx}"] = None
         if any_round:
             per_round["total"] = total
-            scores[name] = per_round
+            # Keyed lowercase: DataGolf's own casing is inconsistent across
+            # players (confirmed 2026-07-05 -- "van Rooyen, Erik" here vs
+            # "Van Rooyen, Erik" in the odds feed / bets.player_name), and
+            # grade_one()'s lookup was an exact-match dict.get with no
+            # case-folding, so a casing mismatch silently fell into the
+            # "opponent not found -> auto-Win the other side" branch. Confirmed
+            # 2 real bets mis-graded this way (453/512: a 74-74 tie graded Win
+            # instead of Push). grade_one() lowercases its lookup keys to match.
+            scores[name.lower()] = per_round
 
     _round_cache[cache_key] = scores
     print(f"  · cached {len(scores)} player rounds for {tour}/{event_id}/{year}")
@@ -225,8 +248,8 @@ def grade_one(bet: dict) -> Optional[str]:
         elif round_field in ("r3", "round_3"): score_key = "r3"
         elif round_field in ("r4", "round_4"): score_key = "r4"
 
-        p_record = scores.get(player) or {}
-        o_record = scores.get(opponent) or {}
+        p_record = scores.get(player.lower()) or {}
+        o_record = scores.get(opponent.lower()) or {}
         p_score = p_record.get(score_key)
         o_score = o_record.get(score_key)
 
@@ -236,7 +259,15 @@ def grade_one(bet: dict) -> Optional[str]:
             # the requested round hasn't been played yet — return None to
             # leave Pending rather than mis-grading).
             if score_key != "total" and not p_record and not o_record:
-                print(f"  bet {bet['id']}: neither {player} nor {opponent} in event totals")
+                # Only worth a per-bet line when `scores` actually came back with
+                # SOME data (a real, specific name-match miss). When the whole
+                # event's fetch came back empty (event not archived yet — see
+                # fetch_event_rounds' one-time message above), every bet in the
+                # event hits this same branch for the same reason; repeating it
+                # 50+ times is pure noise that buries a genuine mismatch the next
+                # time this fires for a completed event.
+                if scores:
+                    print(f"  bet {bet['id']}: neither {player} nor {opponent} in event totals")
                 return None
             print(f"  bet {bet['id']}: no {score_key} score for {player} or {opponent}")
             return None
