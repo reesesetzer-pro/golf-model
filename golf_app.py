@@ -315,6 +315,30 @@ def american_to_implied(odds):
         return round((100/(o+100)*100) if o > 0 else (abs(o)/(abs(o)+100)*100), 2)
     except: return None
 
+# live_predictions.event_id is ALWAYS the literal string "current" (DataGolf's
+# preds/in-play never returns a real event id -- confirmed live, 100% of rows),
+# so a row can NEVER be filtered by event like field/matchups are. Without a
+# filter, a player's row is a permanent single slot (upserted on dg_id,event_id)
+# that just sits there from whatever tournament last had him "in play" --
+# confirmed live serving days-old leftovers (wrong win probabilities, a
+# fabricated cross-tournament "leaderboard," fabricated live alerts) 2 days
+# before the next tournament even tees off. Recency is the only real signal
+# available: a genuinely in-progress round updates every 15-30 min, so
+# anything older than a few hours is necessarily stale, not live. Shared by
+# every live_predictions consumer in this file -- do not re-derive per-call.
+_LIVE_RECENCY_HOURS = 6
+
+def _is_recent(ts) -> bool:
+    if not ts:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() < _LIVE_RECENCY_HOURS * 3600
+    except Exception:
+        return False
+
 def edge_pct(dg_prob_pct, book_odds):
     """dg_prob_pct is in % form (e.g. 18.5), book_odds is American.
     Edge = DG model prob% - book implied prob%"""
@@ -383,6 +407,7 @@ st.markdown("""
 with st.spinner("Loading live data..."):
     try:
         skill, field, preds, live_preds, fin_odds, matchups, rounds, schedule = load_data()
+        live_preds = [p for p in live_preds if _is_recent(p.get("updated_at"))]
         live_pred_by_id = {int(p["dg_id"]): p for p in live_preds if p.get("dg_id")}
     except Exception as e:
         st.error(f"Could not connect to database: {e}")
@@ -524,16 +549,39 @@ for r in rounds:
 
 # Build field player list
 def implied_from_best(fo):
-    """Return best available American odds from any book column."""
-    for key in ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock", "best_odds"]:
+    """Return the best available American odds across books.
+
+    Was a fixed-priority scan (first populated column in a hardcoded book
+    order) that never actually compared values -- confirmed live returning a
+    WORSE price than the true best (e.g. DraftKings +5000 returned while the
+    real best was BetMGM +6600, 38% of finish_odds rows affected), while the
+    UI's own "Best Book" label elsewhere reads the correctly max()-computed
+    `best_odds`/`best_book` columns golf_sync.py already writes -- so the
+    displayed number and its own book label pointed at two different books.
+    Just use those columns directly; only fall back to a genuine max() scan
+    for legacy rows that predate best_odds being populated.
+    """
+    bo = fo.get("best_odds")
+    if bo is not None:
+        try:
+            if float(bo) != 0:
+                return bo
+        except (TypeError, ValueError):
+            pass
+    best = None
+    for key in ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]:
         val = fo.get(key)
-        if val is not None and val != 0:
-            try:
-                if float(val) != 0:
-                    return val
-            except:
-                pass
-    return None
+        if val is None:
+            continue
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            continue
+        if fval == 0:
+            continue
+        if best is None or fval > best:
+            best = fval
+    return best
 
 # Build field player list
 field_players = []
@@ -1123,8 +1171,22 @@ def _render_must_take():
         # gate below needs the FULL history (especially the newest bets) to
         # compute a real settled_count/h2h_roi, not a truncated 1000-row slice.
         bets_raw = fetch_all(lambda: sb_client.table("bets").select(
-            "result,profit_loss,stake,market"
+            "result,profit_loss,stake,market,notes"
         ))
+        # Exclude AUTO_SHADOW (zero-stake, paper) rows -- this panel's whole
+        # purpose is honesty-signaling ("Live Track Record"), and it was
+        # showing "Settled bets: 366" when the real, at-risk sample is 12 (the
+        # other 354 are $0 shadow picks). The ROI%/gate happened to still be
+        # numerically right today only because shadow rows are stake=0 (so
+        # they don't move the ratio) and because a separately-triggered bad-ROI
+        # condition already forced the tightest gate regardless -- but
+        # `thin_sample` below would silently stay False (366>=20) even once the
+        # REAL n=12 sample is what should still be flagged thin. Matches the
+        # project's own established rule (see memory: real bets vs shadow
+        # matchups are never blended into one figure) and grade_bets.py's own
+        # SHADOW_MARKER-based exclusion elsewhere.
+        from golf_sync import SHADOW_MARKER as _SHADOW_MARKER
+        bets_raw = [b for b in bets_raw if _SHADOW_MARKER not in (b.get("notes") or "")]
         settled = [b for b in bets_raw if b.get("result") in ("Win","Loss","Push")]
         settled_count = len(settled)
         h2h_settled = [b for b in settled if "H2H" in (b.get("market") or "")]
@@ -1815,14 +1877,20 @@ def _render_best_h2h():
 # VIEW: LIVE LEADERBOARD
 # ════════════════════════════════════════════════════════════
 def _render_leaderboard():
-    st.markdown('<div class="section-header">🏆 Live Leaderboard — Masters Tournament</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-header">🏆 Live Leaderboard — {current_event}</div>', unsafe_allow_html=True)
 
     @st.cache_data(ttl=60)
     def load_live():
         sb = get_supabase()
         return sb.table("live_predictions").select("*").order("current_pos").execute().data
 
-    live = load_live()
+    # Same staleness issue as the module-level live_preds (see _is_recent's
+    # docstring): this was a SEPARATE, unfiltered query -- confirmed live
+    # serving an interleaved leaderboard from two different concluded
+    # tournaments (John Deere Classic final round next to a Travelers
+    # Championship mid-round leftover) under a hardcoded "Masters Tournament"
+    # header, 2 days before the next real tournament starts.
+    live = [p for p in (load_live() or []) if _is_recent(p.get("updated_at"))]
 
     if live and any(p.get("current_pos") for p in live):
         st.markdown("""<div class="info-box">
@@ -2353,10 +2421,17 @@ def _render_tracker():
         def load_h2h_scores():
             return (get_supabase()
                     .table("live_predictions")
-                    .select("player_name,current_score,thru,current_pos")
+                    .select("player_name,current_score,thru,current_pos,updated_at")
                     .execute().data or [])
 
-        final       = load_h2h_scores()
+        # Same staleness issue as elsewhere in this file: unfiltered
+        # live_predictions rows include days-old leftovers from a concluded
+        # tournament, already sitting at thru=18 (non-provisional -- "finished")
+        # for 44/159 of the CURRENT field's players even though no round has
+        # been played yet. Without this filter, grading a fresh H2H bet on any
+        # of them would immediately present a confidently wrong, one-click-
+        # confirmable Win/Loss built from the wrong tournament's score.
+        final       = [p for p in load_h2h_scores() if _is_recent(p.get("updated_at"))]
         score_map   = {
             p["player_name"]: {"score": p.get("current_score"),
                                "thru":  p.get("thru") or 0,
@@ -3194,6 +3269,12 @@ def _render_live_alerts():
         return live, bets
 
     live, all_bets   = load_alert_data()
+    # Same staleness issue as the module-level live_preds -- another SEPARATE,
+    # unfiltered query. Without this, days-old leftovers from a concluded
+    # tournament fire fabricated, confidence-scored "live alerts" (confirmed:
+    # 13 alerts for John Deere Classic players 2 days before the next
+    # tournament starts).
+    live = [p for p in live if _is_recent(p.get("updated_at"))]
     settled          = [b for b in all_bets if b.get("result") not in ("Pending", None, "Void")]
     bankroll         = float(st.session_state.get("bankroll", 500.0))
     calibration, mkt_roi, adaptive = _compute_learning_engine(settled)

@@ -1,12 +1,30 @@
 """
 calibration.py — Golf model calibration from settled bets.
 
-Reads settled rows from the `bets` table (user-placed Golf H2H + outright
-bets that grade_bets.py has already marked Win/Loss/Push), buckets by
-market × probability, computes actual hit rate. Lookup feeds the dashboard
-display so the user sees calibrated probabilities, not raw DG output.
+Reads settled rows from the `bets` table (real + AUTO_SHADOW H2H bets that
+grade_bets.py has already marked Win/Loss/Push), buckets by market ×
+probability, computes actual hit rate, and blends it into DG's raw
+probability before any edge/threshold decision is made.
 
-Same pattern as NBA + NHL — different sport, identical logic.
+LIVE as of 2026-07-07 (previously dead code — see git history / memory
+golf_calibration_wired.md for the full story). `calibrate_prob()` is now
+called from BOTH real decision paths: golf_sync.py's shadow_log_matchups()
+(gates which matchups get logged as candidate picks) and picks_today.py's
+matchup_edges() (the shared function must_picks_feed.py uses to build the
+Outlet's actual Golf picks). Both pass market="H2H" literally, matching what
+`bets.market` has always actually stored (confirmed: 100% of 366 rows) — the
+previous docstring's fear of a "round_matchups"/"tournament_matchups"
+mismatch was conflating `matchup_odds.market` (a DIFFERENT table, DataGolf's
+own naming, used only by picks_today.py's --market CLI filter) with
+`bets.market` (always "H2H"); there was never a real vocabulary collision at
+the actual call sites, just an unwired function.
+
+DEFAULT_MIN_N=15 for live gating (checked against real data 2026-07-07: at
+this threshold only 3 buckets currently qualify, and DG's raw probabilities
+are already close to identity in all three — consistent with the
+independent full diagnostic run the same week finding no bucket clears
+|z|>1.2. Wiring this in is about closing the loop for when/if that drifts,
+not an expectation of a big edge shift today.
 """
 from __future__ import annotations
 import re
@@ -33,6 +51,12 @@ _BUCKETS = [
     ("80%+",   0.80, 1.01),
 ]
 
+# Live-gating threshold: higher than the "3" the loose CLI summary() uses
+# (that's a display-only peek), lower than F5's 20 / WC's 30 — Golf simply
+# doesn't have those models' bet volume yet. Chosen so a bucket needs real
+# repeated evidence before it's allowed to move a real edge decision.
+DEFAULT_MIN_N = 15
+
 
 def _bucket(prob: float) -> str:
     for lbl, lo, hi in _BUCKETS:
@@ -52,7 +76,7 @@ def _extract_dg_prob(notes: str) -> float | None:
         return None
 
 
-def load_calibration_lookup(min_n: int = 5) -> dict:
+def load_calibration_lookup(min_n: int = DEFAULT_MIN_N) -> dict:
     """Returns {(market, bucket): actual_hit_rate} for buckets with ≥min_n settled."""
     url, key = _load_secrets()
     sb = create_client(url, key)
@@ -75,18 +99,14 @@ def load_calibration_lookup(min_n: int = 5) -> dict:
 
 
 def calibrate_prob(raw_prob: float, market: str, lookup: dict) -> float:
-    """DEAD CODE as of 2026-07-01 -- not imported by picks_today.py,
-    must_picks_feed.py, or golf_app.py (which has its own separate,
-    documented-display-only _compute_learning_engine). Confirmed unused via
-    grep, not a live path.
-
-    Also currently NON-FUNCTIONAL even if wired in: `lookup` is keyed by
-    bets.market values ("H2H", "H2H R1", ...) from load_calibration_lookup(),
-    but a real caller would pass picks_today's market vocabulary
-    ("round_matchups"/"tournament_matchups") -- the two never overlap, so
-    every call would silently fall through to `return raw_prob` below (no
-    calibration applied, no error). Fix the vocabulary mismatch before ever
-    wiring this in for real.
+    """Blend DG's raw probability toward this bucket's REALIZED hit rate
+    (40% raw / 60% empirical — same shrink-toward-observed pattern F5 and WC
+    use, just a different split since Golf's sample is much thinner). Callers
+    MUST pass market="H2H" (the only value `bets.market` has ever actually
+    stored, verified 2026-07-07) -- passing anything else guarantees a lookup
+    miss and a silent no-op fallback to raw_prob below, exactly the bug this
+    module sat in for weeks. No bucket match (thin data or a genuinely
+    well-calibrated band) -> honest passthrough, not a forced adjustment.
     """
     if raw_prob is None or raw_prob != raw_prob:
         return raw_prob

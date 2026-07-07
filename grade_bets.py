@@ -290,6 +290,24 @@ def grade_one(bet: dict) -> Optional[str]:
             o_made_cut = o_record.get("r3") is not None and o_record.get("r4") is not None
             if p_made_cut != o_made_cut:
                 return "Win" if p_made_cut else "Loss"
+            # Same made_cut status (both False here) doesn't mean the same ROUND
+            # COUNT: a player who withdrew AFTER making the 36-hole cut (3 rounds
+            # played, e.g. r1/r2/r3 present) looks identical to a genuine 36-hole
+            # miss (2 rounds) under the r3/r4-presence check above -- both have
+            # r4=None. Their raw `total` then isn't apples-to-apples (a 3-round
+            # total vs a 2-round total). Verified live: 2026 RBC Canadian Open has
+            # both cases in the same field (Koepka: WD after 3 rounds, 204 total;
+            # several genuine 36-hole misses at 2 rounds, ~139 total) -- comparing
+            # those totals directly can invert the "missed cut = worst" rule
+            # depending on the specific scores. Detect via round-count parity
+            # instead of guessing; leave pending rather than compare unlike things.
+            p_rounds = sum(1 for k in ("r1", "r2", "r3", "r4") if p_record.get(k) is not None)
+            o_rounds = sum(1 for k in ("r1", "r2", "r3", "r4") if o_record.get(k) is not None)
+            if p_rounds != o_rounds:
+                print(f"  bet {bet['id']}: {player} ({p_rounds}rd) vs {opponent} ({o_rounds}rd) "
+                      f"— mismatched round counts (withdrew-after-cut vs missed-cut?), "
+                      f"can't compare like-for-like, leaving pending")
+                return None
         if p_score < o_score:
             return "Win"
         if p_score > o_score:
@@ -306,27 +324,57 @@ def grade_one(bet: dict) -> Optional[str]:
         evt = find_event(tournament, bet_date)
         if not evt:
             return None
-        winner = (evt.get("winner") or "").split("(")[0].strip()
-        if not winner:
+        # winner can be MULTIPLE co-champions in a team event, ";"-separated
+        # (e.g. "Fitzpatrick, Alex (25362);Fitzpatrick, Matt (17646)" for the
+        # 2026 Zurich Classic) -- splitting once on "(" before also splitting
+        # on ";" silently kept only the first name, so a Win bet on the
+        # second-listed co-champion always graded Loss even though he won.
+        # Case-insensitive compare added to match the H2H branch's existing
+        # .lower() fix (same DataGolf-vs-feed casing risk applies here too;
+        # dormant today only because 0/366 live bets use this market).
+        winners = [w.split("(")[0].strip().lower()
+                   for w in (evt.get("winner") or "").split(";") if w.strip()]
+        if not winners:
             return None
-        return "Win" if (bet.get("player_name") or "").strip() == winner else "Loss"
+        return "Win" if (bet.get("player_name") or "").strip().lower() in winners else "Loss"
 
     return None
 
 
 def _closing_clv(bet: dict) -> Optional[float]:
     """CLV% for a shadow bet vs the last pre-round odds snapshot that
-    golf_sync.py writes to closing_lines.json (keyed by SHADOW_KEY; the bet's
-    player is always the p1 side of its key). None when no snapshot exists —
-    report-only, never blocks grading (the bets table has no closing column)."""
+    golf_sync.py writes to closing_lines.json.
+
+    FIX (2026-07-07): a bet's own SHADOW_KEY embeds "event|round|player|
+    opponent" in WHICHEVER order the bet was logged (the shadow-logged side
+    can be either p1 or p2), but closing_lines.json is always snapshotted
+    canonically as "event|round|p1_name|p2_name" regardless. For a bet logged
+    on the p2 side, the two key orderings never match, so the old code (which
+    always looked up `key` as-is and always read the "p1" field) silently
+    returned None even when a real snapshot existed under the reversed key.
+    Confirmed live: 22 of 55 bets with an available snapshot (40%) were
+    dropped this way, silently biasing the avg-CLV line this file's own
+    main() prints. Fix: try both orderings, and read whichever side of the
+    record the FOUND key's ordering says is this bet's own player -- not
+    hardcoded "p1"."""
     import json as _json, os as _os
     notes = bet.get("notes") or ""
     if "SHADOW_KEY=" not in notes:
         return None
     key = notes.split("SHADOW_KEY=", 1)[1].strip()
+    parts = key.split("|")
+    if len(parts) != 4:
+        return None
+    event, rnd, player, opponent = parts
     try:
         path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "closing_lines.json")
-        close = _json.load(open(path)).get(key, {}).get("p1")
+        lines = _json.load(open(path))
+        rec, side = lines.get(key), "p1"
+        if rec is None:
+            rec, side = lines.get(f"{event}|{rnd}|{opponent}|{player}"), "p2"
+        if rec is None:
+            return None
+        close = rec.get(side)
         bet_odds = float(bet.get("odds") or 0)
         close = float(close)
         if not bet_odds or not close:

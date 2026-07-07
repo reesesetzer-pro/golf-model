@@ -31,6 +31,8 @@ import requests
 from datetime import datetime, timezone
 from supabase import create_client, Client
 
+from calibration import calibrate_prob, load_calibration_lookup
+
 # ── Credentials ────────────────────────────────────────────────────────────────
 DG_API_KEY   = "c896625a505f2b6b6334c7495883"
 SUPABASE_URL = "https://ithrwemqnmgrjvutqmhl.supabase.co"
@@ -912,6 +914,12 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
             return (o / 100.0) if o > 0 else (100.0 / abs(o))
         return -1.0
 
+    # Loaded ONCE per sync run (not per matchup) — calibrate_prob() blends DG's
+    # raw win prob toward this bucket's REALIZED hit rate before the edge gate
+    # below, so the decision of what counts as "positive edge" reflects actual
+    # settled history, not just DG's number at face value. See calibration.py.
+    cal_lookup = load_calibration_lookup()
+
     logged = 0
     for m in res:
         for side in ("p1", "p2"):
@@ -926,7 +934,8 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
             book_p = _american_to_implied(book_odds)
             if book_p is None:
                 continue
-            edge_pp = (float(dg_p) - book_p) * 100
+            cal_p = calibrate_prob(float(dg_p), "H2H", cal_lookup)
+            edge_pp = (cal_p - book_p) * 100
             if edge_pp <= min_edge_pp:
                 continue
             # Dedup key: event|round|p1|p2 (player picked + opponent)
@@ -934,9 +943,13 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
             if key in existing_keys:
                 continue
 
-            # Stake=0 means "shadow only — does not affect real P&L"
+            # Stake=0 means "shadow only — does not affect real P&L". Notes
+            # carry BOTH the raw DG number (audit trail back to the source)
+            # and the calibrated one actually used for the edge, when they
+            # differ — cal==dg_p whenever no bucket qualified (honest passthrough).
+            cal_note = "" if abs(cal_p - float(dg_p)) < 1e-6 else f" (cal {cal_p*100:.1f}%)"
             note = (f"{SHADOW_MARKER} [{event_name}] vs {opponent} | "
-                    f"DG: {float(dg_p)*100:.1f}% | Book: {book_p*100:.1f}% | "
+                    f"DG: {float(dg_p)*100:.1f}%{cal_note} | Book: {book_p*100:.1f}% | "
                     f"SHADOW_KEY={key}")
             try:
                 supabase.table("bets").insert({
@@ -1178,9 +1191,20 @@ def sync_odds_api_to_finish_odds():
     book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
     now = now_utc()
 
-    # Build name → dg_id lookup from skill_ratings
+    # Build name → dg_id lookup from skill_ratings, AND the reverse (dg_id ->
+    # DataGolf's own canonical-cased name). finish_odds' real unique constraint
+    # is (event_id, market, player_name) -- text, case-sensitive. The Odds
+    # API's own casing for a name ("MacIntyre, Robert") doesn't always match
+    # DataGolf's ("Macintyre, Robert"), so writing the RAW Odds-API-cased name
+    # here created a second physical row for the same golfer/market instead of
+    # updating the existing one -- confirmed live (2 stale duplicate rows, one
+    # over a month old holding a wildly wrong price). Writing DataGolf's own
+    # canonical name back (same casing sync_finish_odds()'s DataGolf-sourced
+    # writes already use) makes both write paths agree on one spelling, so the
+    # unique constraint actually collapses them the way it's supposed to.
     sr = supabase.table("skill_ratings").select("dg_id,player_name").execute().data or []
     name_to_dgid = {r["player_name"].lower(): r["dg_id"] for r in sr if r.get("player_name") and r.get("dg_id")}
+    dgid_to_canonical_name = {r["dg_id"]: r["player_name"] for r in sr if r.get("player_name") and r.get("dg_id")}
 
     active_sports = discover_active_golf_sports()
     markets_found = []
@@ -1230,7 +1254,7 @@ def sync_odds_api_to_finish_odds():
                     "dg_id":       dg_id,
                     "event_id":    "current",
                     "market":      market,
-                    "player_name": player_name,
+                    "player_name": dgid_to_canonical_name.get(dg_id, player_name),
                     "tour":        "pga",
                     "best_odds":   best_odds,
                     "best_book":   best_book,
@@ -1352,6 +1376,52 @@ def pre_sync():
     log.info("━━━  PRE-TOURNAMENT SYNC COMPLETE  ━━━")
 
 
+# ── concurrency lock ─────────────────────────────────────────────────────────
+# Neither sync-all-models.sh nor refresh-picks.sh has ever had a lock around
+# this script, and shadow_log_matchups()'s duplicate prevention is a Python
+# set() loaded fresh once per process -- two concurrent runs give each other
+# zero protection (the `bets` table has no unique constraint beyond its PK).
+# Confirmed this ALREADY happened in production, not just theoretically: the
+# 01:00 ET run on 2026-07-07 took 3h43m (02:20:51-06:04:29, DataGolf API
+# flakiness inside sync_rounds' historical-raw-data loop) and the scheduled
+# 03:00 run started at 04:01:18 -- both "GOLF SYNC — FULL" ran concurrently
+# for ~2 hours, hitting the same Supabase tables. Neither caused damage that
+# night only because matchup_odds had zero rows for the current event at the
+# time (see the current_event_id staleness fix) -- the instant real matchup
+# data is flowing and this recurs, two runs can each load an identical
+# existing-shadow-keys snapshot and both insert rows for the same matchup,
+# reproducing the exact 993-duplicate-row class of bug already found and
+# fixed this week, via a different root cause (concurrency, not a parsing bug).
+_LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".golf_sync.lock")
+
+
+def _acquire_lock() -> bool:
+    """True if this process now holds the lock. A stale lock (PID no longer
+    running -- e.g. a prior crash) is cleared automatically rather than
+    permanently wedging every future run; that's the only case this ever
+    removes another process's lock file."""
+    if os.path.exists(_LOCK_PATH):
+        try:
+            with open(_LOCK_PATH) as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)   # raises OSError if that PID isn't running
+            return False          # a real, live run already holds the lock
+        except (ValueError, ProcessLookupError, FileNotFoundError):
+            pass   # stale/unreadable lock -- safe to reclaim
+        except PermissionError:
+            return False   # PID exists and we can't signal it -> treat as live
+    with open(_LOCK_PATH, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    try:
+        os.remove(_LOCK_PATH)
+    except FileNotFoundError:
+        pass
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Golf Model Sync Script")
     parser.add_argument(
@@ -1362,12 +1432,19 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.mode == "setup":
-        setup_tables()
-    elif args.mode == "live":
-        live_sync()
-    elif args.mode == "pre":
-        pre_sync()
-    else:
-        full_sync()
+    if not _acquire_lock():
+        log.warning(f"  Another golf_sync.py is already running (lock held: {_LOCK_PATH}) "
+                    f"— skipping this invocation rather than racing it.")
+        raise SystemExit(0)
+    try:
+        if args.mode == "setup":
+            setup_tables()
+        elif args.mode == "live":
+            live_sync()
+        elif args.mode == "pre":
+            pre_sync()
+        else:
+            full_sync()
+    finally:
+        _release_lock()
 
