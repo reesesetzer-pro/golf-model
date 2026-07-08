@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from supabase import create_client, Client
 
 from calibration import calibrate_prob, load_calibration_lookup
+from golf_db import fetch_all
 
 # ── Credentials ────────────────────────────────────────────────────────────────
 DG_API_KEY   = "c896625a505f2b6b6334c7495883"
@@ -856,13 +857,22 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
         log.warning("  shadow_log: no current event_id available — skipping")
         return 0
 
-    # Pull matchups for THIS event only
-    res = (supabase.table("matchup_odds")
+    # Pull matchups for THIS event only. Was .limit(2000) -- PostgREST's
+    # server-side max-rows cap overrides any client .limit() (confirmed live:
+    # 1000 rows returned regardless), so this was really .limit(1000) in
+    # disguise. Currently harmless (largest real per-event bucket seen is
+    # 706), but the "current" literal-event_id fallback bucket (used whenever
+    # DataGolf's field-updates call doesn't supply a real id) keeps
+    # accumulating across every sync that hits it, so this was a landmine
+    # waiting for a big enough field/enough accumulated fallback rows.
+    # fetch_all is the same pagination helper already used everywhere else in
+    # this file for exactly this failure mode.
+    res = fetch_all(lambda: supabase.table("matchup_odds")
            .select("event_id,market,round_num,p1_name,p2_name,"
                    "p1_dg_win_prob,p2_dg_win_prob,"
                    "p1_best_odds,p1_best_book,p2_best_odds,p2_best_book")
            .eq("event_id", current_event_id)
-           .order("updated_at", desc=True).limit(2000).execute().data) or []
+           .order("updated_at", desc=True))
     if not res:
         log.info(f"  shadow_log: no matchups for event {current_event_id} ({event_name})")
         return 0
