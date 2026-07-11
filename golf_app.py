@@ -9,6 +9,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 from golf_db import fetch_all
+from round_status import live_round_status, matchup_is_decided
 from datetime import datetime, timezone, timedelta
 
 def now_et():
@@ -524,6 +525,29 @@ _GOLF_COURSE_COORDS = {
 if current_event_id is not None:
     field    = [r for r in field    if str(r.get("event_id")) == str(current_event_id)]
     matchups = [r for r in matchups if str(r.get("event_id")) == str(current_event_id)]
+
+# ── Round-completion guard (ported from picks_today.matchup_edges, 2026-07-11) ──
+# matchup_odds keeps every round's rows forever — a finished round's
+# round_matchups rows are only superseded once the NEXT round's odds post,
+# never deleted — so every H2H view fed by `matchups` (Best H2H, Live Matchups,
+# Best Plays by Book, MUST TAKE tiers, the header sharp-play count) was serving
+# already-decided pairings as actionable, the exact bug class fixed on the
+# picks_today/Outlet side 2026-07-10. Gate the shared `matchups` list ONCE here,
+# right after the event filter, instead of re-implementing per view; see
+# round_status.py for the live-verified history. Fails open ({} on any pull
+# failure → nothing suppressed). tournament_matchups rows aren't round-scoped
+# and pass through untouched.
+@st.cache_data(ttl=120)  # in-play pull, cached so widget reruns don't hammer DG
+def _load_live_round_status():
+    return live_round_status()
+
+n_decided_matchups = 0
+if any(m.get("market") == "round_matchups" and m.get("round_num") for m in matchups):
+    _live_rs = _load_live_round_status()
+    if _live_rs:
+        _n_before = len(matchups)
+        matchups = [m for m in matchups if not matchup_is_decided(m, _live_rs)]
+        n_decided_matchups = _n_before - len(matchups)
 
 # Index data
 skill_by_id  = {int(p["dg_id"]): p for p in skill if p.get("dg_id")}
@@ -1636,12 +1660,17 @@ def _render_best_h2h():
         min_edge_h2h = st.slider("Min Edge %", 0.0, 10.0, 1.0, 0.5,
                                   key="h2h_edge", label_visibility="collapsed")
     with col_f2:
-        # Auto-detect current round from matchups; fall back to All Rounds
+        # Auto-detect current round from matchups; fall back to All Rounds.
+        # Default to the LATEST round present — index=0 pointed at sorted()[0],
+        # the OLDEST round still lingering in matchup_odds, so once R2+ odds
+        # posted the view opened on a finished round by default. `matchups` is
+        # already round-completion-gated at module level, so the max round
+        # here is the freshest still-actionable one.
         _rounds_available = sorted({m.get("round_num") for m in matchups if m.get("round_num")})
-        _cur_round = f"Round {_rounds_available[0]}" if _rounds_available else "All Rounds"
-        _round_opts = [f"Round {r}" for r in sorted(_rounds_available)] + ["All Rounds"]
+        _round_opts = [f"Round {r}" for r in _rounds_available] + ["All Rounds"]
         round_filter = st.selectbox("Round", _round_opts,
-                                     index=0, label_visibility="collapsed")
+                                     index=max(len(_rounds_available) - 1, 0),
+                                     label_visibility="collapsed")
     with col_f3:
         side_filter = st.selectbox("Side", ["Both Sides", "Favorites Only", "Underdogs Only"],
                                     label_visibility="collapsed")
