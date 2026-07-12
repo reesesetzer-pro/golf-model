@@ -549,6 +549,13 @@ if any(m.get("market") == "round_matchups" and m.get("round_num") for m in match
         matchups = [m for m in matchups if not matchup_is_decided(m, _live_rs)]
         n_decided_matchups = _n_before - len(matchups)
 
+def _decided_matchups_note():
+    """Tell the H2H views WHY the board is thinner than the raw table — without
+    this, suppressed rows just look like missing data during a live round."""
+    if n_decided_matchups:
+        st.caption(f"🕐 {n_decided_matchups} already-decided round matchup(s) hidden "
+                   f"— both players have finished that round")
+
 # Index data
 skill_by_id  = {int(p["dg_id"]): p for p in skill if p.get("dg_id")}
 field_ids    = {int(p["dg_id"]) for p in field if p.get("dg_id")}
@@ -1642,6 +1649,7 @@ def _play_recommendation(dg_prob: float, american_odds) -> dict:
 
 def _render_best_h2h():
     st.markdown('<div class="section-header">🎯 Best H2H Plays Today — Ranked by Edge</div>', unsafe_allow_html=True)
+    _decided_matchups_note()
 
     st.markdown("""<div class="info-box">
         Matchups ranked by edge % (DG model win probability vs implied book probability).
@@ -2818,6 +2826,7 @@ def _render_course_history():
 # ════════════════════════════════════════════════════════════
 def _render_live_matchups():
     st.markdown('<div class="section-header">Live Round H2H Matchup Odds — DataGolf Model</div>', unsafe_allow_html=True)
+    _decided_matchups_note()
 
     if matchups:
         m_rows = []
@@ -2943,6 +2952,7 @@ Complete sync of all tables including historical data""")
 # ════════════════════════════════════════════════════════════
 def _render_best_plays_by_book():
     st.markdown('<div class="section-header">📚 Best Plays by Book — Where to Bet Today</div>', unsafe_allow_html=True)
+    _decided_matchups_note()
     st.markdown("""<div class="info-box">
         Top edges available at each sportsbook across all markets (Finish Position + H2H).
         Ranked by Sharp Value tier, then Edge %. Only plays ≥3% edge shown.
