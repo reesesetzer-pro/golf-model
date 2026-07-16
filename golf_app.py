@@ -538,12 +538,17 @@ if current_event_id is not None:
 # failure → nothing suppressed). tournament_matchups rows aren't round-scoped
 # and pass through untouched.
 @st.cache_data(ttl=120)  # in-play pull, cached so widget reruns don't hammer DG
-def _load_live_round_status():
-    return live_round_status()
+def _load_live_round_status(expected_event_name):
+    # expected_event_name gates a STALE between-events in-play feed (2026-07-15:
+    # the day before The Open, preds/in-play still served the finished Scottish
+    # Open and falsely suppressed 87 live Open R1 matchups). It's also the cache
+    # key, so a new event correctly busts the 120s cache instead of reusing the
+    # prior event's status. See round_status.live_round_status.
+    return live_round_status(expected_event_name=expected_event_name)
 
 n_decided_matchups = 0
 if any(m.get("market") == "round_matchups" and m.get("round_num") for m in matchups):
-    _live_rs = _load_live_round_status()
+    _live_rs = _load_live_round_status(current_event)
     if _live_rs:
         _n_before = len(matchups)
         matchups = [m for m in matchups if not matchup_is_decided(m, _live_rs)]
