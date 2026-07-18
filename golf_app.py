@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 from golf_db import fetch_all
-from round_status import live_round_status, matchup_is_decided
+from round_status import live_round_status, matchup_is_decided, matchup_started
 from datetime import datetime, timezone, timedelta
 
 def now_et():
@@ -549,10 +549,22 @@ def _load_live_round_status(expected_event_name):
 n_decided_matchups = 0
 if any(m.get("market") == "round_matchups" and m.get("round_num") for m in matchups):
     _live_rs = _load_live_round_status(current_event)
-    if _live_rs:
-        _n_before = len(matchups)
-        matchups = [m for m in matchups if not matchup_is_decided(m, _live_rs)]
+    _n_before = len(matchups)
+    if _live_rs is None:
+        # Verification failed during an active event -> fail CLOSED for
+        # round-scoped rows (2026-07-18 429 incident: fail-open served stale
+        # mid-round prices as MUSTs). tournament_matchups pass through.
+        matchups = [m for m in matchups if m.get("market") != "round_matchups"]
         n_decided_matchups = _n_before - len(matchups)
+    elif _live_rs:
+        # decided (round complete) OR in-progress (round underway) — a pregame
+        # line is only actionable before either player tees off; see
+        # round_status.matchup_started (added 2026-07-18, The Open R3 incident).
+        matchups = [m for m in matchups
+                    if not matchup_is_decided(m, _live_rs)
+                    and not matchup_started(m, _live_rs)]
+        n_decided_matchups = _n_before - len(matchups)
+    # _live_rs == {} -> different event in feed (between events): serve all.
 
 def _decided_matchups_note():
     """Tell the H2H views WHY the board is thinner than the raw table — without
