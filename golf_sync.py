@@ -771,9 +771,68 @@ def sync_live_predictions(tour: str = "pga"):
     upsert("live_predictions", rows, "dg_id,event_id")
 
 
+# Every book DataGolf actually returns on betting-tools/outrights. The original
+# list held 7 names, 2 of which (thescore, hardrock) DataGolf never sends, while
+# MISSING 7 it does send — so best-price shopping was drawn from a partial field.
+# Verified live 2026-08-02 against the Rocket Classic response.
+DG_BOOK_COLS = [
+    "draftkings", "fanduel", "betmgm", "caesars", "bet365", "betway", "bovada",
+    "betonline", "betcris", "pointsbet", "skybet", "unibet", "williamhill",
+]
+
+
+def _am(v):
+    """DataGolf sends American odds as STRINGS ('-667'). Coerce or drop."""
+    if v in (None, "", "-"):
+        return None
+    try:
+        return int(float(str(v).replace("+", "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _best_american(book_odds: dict):
+    """Best price FOR THE BETTOR = highest American value.
+
+    Correct across the sign boundary: +250 > +150 > -110 > -200 as integers, and
+    a bigger American number is always a better payout. The prior version applied
+    max() to raw STRINGS, so "-667" sorted above "+250" lexicographically and the
+    'best book' was frequently the worst price on the board."""
+    clean = {k: _am(v) for k, v in book_odds.items()}
+    clean = {k: v for k, v in clean.items() if v is not None}
+    if not clean:
+        return None, None
+    book = max(clean, key=lambda k: clean[k])
+    return clean[book], book
+
+
 def sync_finish_odds(tour: str = "pga"):
-    """Pull DataGolf finish position odds (Win/Top5/Top10/Top20/Make Cut)
-    with book odds alongside model probabilities."""
+    """Pull DataGolf finish-position odds (Win/Top5/Top10/Top20/MakeCut) with book
+    prices alongside model probabilities.
+
+    ============================================================================
+    FOUR BUGS FIXED 2026-08-02 — this table had 1,000 rows and every price NULL
+    ============================================================================
+    1. `odds` IS NOT ALWAYS A LIST. When a market is unavailable DataGolf returns
+       a STRING in that field, e.g. make_cut mid-tournament yields
+       "No make_cut bets being offered right now." Iterating it crashed the whole
+       market with `'str' object has no attribute 'items'`.
+    2. WRONG PROBABILITY KEYS. Code read `baseline_prob` / `baseline_odds`, which
+       DataGolf does not send. The real shape is a nested dict:
+           "datagolf": {"baseline": null, "baseline_history_fit": "-346"}
+       and during a LIVE tournament `baseline` is null while
+       `baseline_history_fit` still carries a value — so dg_prob was always NULL
+       and no edge could ever be computed.
+    3. BEST-PRICE PICKED BY STRING SORT. max() over raw strings ranked "-667"
+       above "+250". See _best_american.
+    4. BOOK LIST WAS WRONG. 2 of 7 names are never sent by DataGolf; 7 real ones
+       were missing entirely. See DG_BOOK_COLS.
+
+    ALSO: the Odds API carries NO golf finish markets — only 4 major-winner keys
+    exist (verified live). GOLF_FINISH_MARKET_MAP requests make_cut/top_N keys
+    that do not exist, which is why that path only ever produced empty rows.
+    DataGolf is the sole viable source for these markets.
+    """
     for market in ["win", "top_5", "top_10", "top_20", "make_cut"]:
         log.info(f"Syncing finish odds ({tour} / {market})...")
         data = dg_get("betting-tools/outrights", {
@@ -783,41 +842,61 @@ def sync_finish_odds(tour: str = "pga"):
         })
         if not data:
             continue
-        event_id = str(data.get("event_id", "current"))
-        players  = data.get("odds", [])
-        rows = []
+
+        players = data.get("odds")
+        if not isinstance(players, list):
+            # DataGolf puts an explanatory string here when the market is closed.
+            log.info(f"  {market}: not offered — {str(players)[:80]}")
+            continue
+
+        # A real event key, not the literal "current". Without this every week
+        # overwrites the last and NO history accumulates — which is why this
+        # table could never be backtested.
+        event_id = str(data.get("event_id")
+                       or data.get("event_name")
+                       or "unknown").strip().lower().replace(" ", "_")
+
+        rows, no_price, no_prob = [], 0, 0
         for p in players:
-            if not isinstance(p, dict): continue
-            # Find best odds (highest American = best value for bettors)
-            book_cols = ["draftkings", "fanduel", "betmgm", "caesars", "bet365", "thescore", "hardrock"]
-            book_odds = {k: p.get(k) for k in book_cols if p.get(k)}
-            best_odds = None
-            best_book = None
-            if book_odds:
-                # For positive odds (underdogs): highest = best value
-                # For negative odds (favorites): least negative = best value
-                best_book = max(book_odds, key=lambda k: book_odds[k])
-                best_odds = book_odds[best_book]
-            rows.append({
+            if not isinstance(p, dict):
+                continue
+            book_odds = {k: p.get(k) for k in DG_BOOK_COLS if p.get(k) not in (None, "")}
+            best_odds, best_book = _best_american(book_odds)
+            if best_odds is None:
+                no_price += 1
+
+            dg = p.get("datagolf") or {}
+            if not isinstance(dg, dict):
+                dg = {}
+            # baseline is null mid-tournament; history-fit still carries a number
+            dg_odds = _am(dg.get("baseline")) or _am(dg.get("baseline_history_fit"))
+            if dg_odds is None:
+                no_prob += 1
+            dg_prob = None
+            if dg_odds is not None:
+                dg_prob = (100 / (dg_odds + 100)) if dg_odds > 0 else (-dg_odds / (-dg_odds + 100))
+
+            row = {
                 "dg_id":       p.get("dg_id"),
                 "event_id":    event_id,
                 "market":      market,
                 "player_name": p.get("player_name"),
                 "tour":        tour,
-                "dg_prob":     p.get("baseline_prob"),
-                "dg_odds":     p.get("baseline_odds"),
-                "draftkings":  p.get("draftkings"),
-                "fanduel":     p.get("fanduel"),
-                "betmgm":      p.get("betmgm"),
-                "caesars":     p.get("caesars"),
-                "bet365":      p.get("bet365"),
-                "thescore":    p.get("thescore"),
-                "hardrock":    p.get("hardrock"),
+                "dg_prob":     round(dg_prob, 5) if dg_prob is not None else None,
+                "dg_odds":     dg_odds,
                 "best_odds":   best_odds,
                 "best_book":   best_book,
                 "updated_at":  now_utc(),
-            })
-        upsert("finish_odds", rows)
+            }
+            # only write book columns the table actually has
+            for col in ("draftkings", "fanduel", "betmgm", "caesars", "bet365"):
+                row[col] = _am(p.get(col))
+            rows.append(row)
+
+        log.info(f"  {market}: {len(rows)} players | event={event_id} | "
+                 f"no price {no_price} | no model prob {no_prob}")
+        if rows:
+            upsert("finish_odds", rows)
         time.sleep(0.5)
 
 
@@ -951,6 +1030,34 @@ def shadow_log_matchups(min_edge_pp: float = 0.0) -> int:
             # Dedup key: event|round|p1|p2 (player picked + opponent)
             key = f"{m.get('event_id')}|{m.get('round_num')}|{player}|{opponent}"
             if key in existing_keys:
+                continue
+
+            # WRITE-TIME dedup (2026-08-02): the in-memory existing_keys set is a
+            # snapshot taken once per process — it gives ZERO protection against a
+            # concurrent run (the exact concurrency scenario documented at the
+            # lock section below, confirmed to have happened 2026-07-07) or any
+            # future caller that invokes this function outside golf_sync's
+            # __main__ lock. The bets table has no unique constraint (PostgREST
+            # can't add one), so enforce idempotency here: immediately before
+            # each insert, re-check the DB for this exact SHADOW_KEY. This only
+            # runs for rows that already passed the set check (i.e. genuinely
+            # new picks, typically 0-100 per run), so the cost is one cheap
+            # indexed-ish select per NEW row, not per matchup. LIKE wildcards
+            # (%, _) are escaped defensively — golfer names don't contain them
+            # today, but an unescaped '_' would silently widen the match.
+            _esc = key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            try:
+                _hit = (supabase.table("bets").select("id")
+                        .like("notes", f"%SHADOW_KEY={_esc}")
+                        .limit(1).execute().data)
+            except Exception as e:
+                # Fail CLOSED: if the dup-check itself errors, skip the insert
+                # rather than risk writing a duplicate. The pick will be logged
+                # by the next healthy sync run.
+                log.warning(f"  shadow_log dup-check failed for {key}: {e} — skipping insert")
+                continue
+            if _hit:
+                existing_keys.add(key)
                 continue
 
             # Stake=0 means "shadow only — does not affect real P&L". Notes
