@@ -14,28 +14,29 @@ The event_id is resolved via the schedule table by tournament name + nearest yea
 """
 from __future__ import annotations
 import re
+import sys
 import time
 import requests
+from pathlib import Path
 from typing import Optional
 from supabase import create_client, ClientOptions
 
 from golf_db import fetch_all
 
+_WORKSPACE = Path(__file__).resolve().parent.parent
+if str(_WORKSPACE) not in sys.path:
+    sys.path.insert(0, str(_WORKSPACE))
+from secure_config import get_secret, require_secrets
+
 
 # ── Secrets ───────────────────────────────────────────────────────────────────
 def _load_secrets():
-    with open("golf_secrets.toml") as f:
-        txt = f.read()
-    url = re.search(r"SUPABASE_URL\s*=\s*['\"]([^'\"]+)", txt).group(1)
-    key = re.search(r"SUPABASE_KEY\s*=\s*['\"]([^'\"]+)", txt).group(1)
-    return url, key
+    return require_secrets("SUPABASE_URL", "SUPABASE_KEY")
 
 
 # DataGolf API key is hardcoded in golf_sync.py — re-use it
 def _dg_key():
-    with open("golf_sync.py") as f:
-        src = f.read()
-    return re.search(r"DG_API_KEY\s*=\s*['\"]([^'\"]+)", src).group(1)
+    return get_secret("DG_API_KEY", required=True)
 
 
 SUPABASE_URL, SUPABASE_KEY = _load_secrets()

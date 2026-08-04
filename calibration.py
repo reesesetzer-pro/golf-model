@@ -29,18 +29,21 @@ not an expectation of a big edge shift today.
 from __future__ import annotations
 import re
 import json
+import sys
+from pathlib import Path
 import pandas as pd
 from supabase import create_client
 
 from golf_db import fetch_all
 
+_WORKSPACE = Path(__file__).resolve().parent.parent
+if str(_WORKSPACE) not in sys.path:
+    sys.path.insert(0, str(_WORKSPACE))
+from secure_config import require_secrets
+
 
 def _load_secrets():
-    with open("golf_secrets.toml") as f:
-        txt = f.read()
-    url = re.search(r"SUPABASE_URL\s*=\s*['\"]([^'\"]+)", txt).group(1)
-    key = re.search(r"SUPABASE_KEY\s*=\s*['\"]([^'\"]+)", txt).group(1)
-    return url, key
+    return require_secrets("SUPABASE_URL", "SUPABASE_KEY")
 
 
 _BUCKETS = [

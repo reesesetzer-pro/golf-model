@@ -5,12 +5,29 @@ Run locally: streamlit run golf_app.py
 """
 
 import re
+import sys
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 from supabase import create_client
 from golf_db import fetch_all
 from round_status import live_round_status, matchup_is_decided, matchup_started
 from datetime import datetime, timezone, timedelta
+
+_WORKSPACE = Path(__file__).resolve().parent.parent
+if str(_WORKSPACE) not in sys.path:
+    sys.path.insert(0, str(_WORKSPACE))
+try:
+    from evidence_gate import stake_or_zero
+except ImportError:
+    def stake_or_zero(model: str, proposed: float) -> float:
+        return 0.0
+try:
+    from gate_ui import render_streamlit_gate
+except ImportError:
+    def render_streamlit_gate(st_module, model: str) -> bool:
+        st_module.error(f"PAPER ONLY — {model} cannot verify the evidence gate in this deployment.")
+        return False
 
 def now_et():
     utc_now = datetime.now(timezone.utc)
@@ -61,6 +78,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+render_streamlit_gate(st, "golf_h2h")
 
 # ── Auto-refresh ────────────────────────────────────────────────────────────────
 from streamlit_autorefresh import st_autorefresh
@@ -3304,7 +3322,8 @@ def _kelly_stake(dg_prob_pct, book_odds_american, bankroll, fraction=0.5):
     kelly_f = (b * p - (1.0 - p)) / b
     if kelly_f <= 0:
         return 0.0
-    return round(max(1.0, kelly_f * fraction * bankroll), 2)
+    proposed = round(max(1.0, kelly_f * fraction * bankroll), 2)
+    return stake_or_zero("golf_h2h", proposed)
 
 
 # ════════════════════════════════════════════════════════════
@@ -3863,4 +3882,3 @@ st.markdown("""
     ⛳ Golf Betting Model · DataGolf + The Odds API · Built by Jet Excellence Analytics
 </div>
 """, unsafe_allow_html=True)
-

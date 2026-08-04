@@ -29,16 +29,22 @@ import logging
 import argparse
 import requests
 from datetime import datetime, timezone
+from pathlib import Path
 from supabase import create_client, Client
+
+_WORKSPACE = Path(__file__).resolve().parent.parent
+if str(_WORKSPACE) not in sys.path:
+    sys.path.insert(0, str(_WORKSPACE))
+from secure_config import get_secret
 
 from calibration import calibrate_prob, load_calibration_lookup
 from golf_db import fetch_all
 
 # ── Credentials ────────────────────────────────────────────────────────────────
-DG_API_KEY   = "c896625a505f2b6b6334c7495883"
-SUPABASE_URL = "https://ithrwemqnmgrjvutqmhl.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml0aHJ3ZW1xbm1ncmp2dXRxbWhsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2MDkxNDMsImV4cCI6MjA5MTE4NTE0M30.d9Cm7PiVrB566JJYRQUPZJcWiV5v8wlvQzaHh-NIJkE"
-ODDS_API_KEY = "40cfbba84e52cd6da31272d4ac287966"
+DG_API_KEY   = get_secret("DG_API_KEY")
+SUPABASE_URL = get_secret("SUPABASE_URL")
+SUPABASE_KEY = get_secret("SUPABASE_KEY")
+ODDS_API_KEY = get_secret("ODDS_API_KEY")
 
 # ── DataGolf Base URL ───────────────────────────────────────────────────────────
 DG_BASE = "https://feeds.datagolf.com"
@@ -1564,4 +1570,3 @@ if __name__ == "__main__":
             full_sync()
     finally:
         _release_lock()
-
