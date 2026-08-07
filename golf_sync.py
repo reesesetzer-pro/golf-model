@@ -503,15 +503,35 @@ def sync_model_snapshot(event_name: str = ""):
         "market_roi":          mkt_roi,
         "adaptive_thresholds": adaptive,
     }
+    # ── THE LEARNING RECORD MUST SURVIVE A MISSING TABLE ───────────────────────
+    # This wrote ONLY to Supabase, and `model_snapshots` does not exist in the
+    # schema (verified 2026-08-06 — `prediction_snapshots` does, and is empty).
+    # Every run since the table went missing has 404'd, been swallowed into a
+    # WARNING, and printed "FULL SYNC COMPLETE" — so the model's entire
+    # calibration/ROI history was silently discarded for an unknown number of
+    # weeks while the log said the sync succeeded.
+    #
+    # A snapshot IS the learning record. Write it LOCALLY first, always, where no
+    # remote schema change can lose it; then mirror to Supabase best-effort.
+    snap_path = Path(__file__).resolve().parent / "data" / "model_snapshots.jsonl"
+    snap_path.parent.mkdir(parents=True, exist_ok=True)
+    with snap_path.open("a") as fh:
+        fh.write(json.dumps(row, default=str) + "\n")
+    log.info(
+        f"Snapshot saved locally ({snap_path.name}) — {len(settled)} settled bets, "
+        f"{len(calibration)} calibration buckets, markets: {list(mkt_roi.keys())}"
+    )
     try:
         supabase.table("model_snapshots").insert(row).execute()
-        log.info(
-            f"Snapshot saved — {len(settled)} settled bets, "
-            f"{len(calibration)} calibration buckets, "
-            f"markets: {list(mkt_roi.keys())}"
-        )
+        log.info("Snapshot mirrored to Supabase")
     except Exception as e:
-        log.warning(f"Snapshot failed (table may not exist yet — run setup): {e}")
+        # Not fatal — the durable copy is already on disk. Say so explicitly so
+        # this never reads as "the snapshot was lost" again.
+        log.warning(
+            f"Supabase mirror failed ({type(e).__name__}); LOCAL COPY RETAINED at "
+            f"{snap_path}. Create the table to re-enable the remote mirror: "
+            f"see the `create table if not exists model_snapshots` DDL in this file."
+        )
 
 
 def setup_tables():
@@ -797,14 +817,40 @@ def _am(v):
         return None
 
 
-def _best_american(book_odds: dict):
+# Books the user can actually place a bet at (North Carolina). DG_BOOK_COLS above
+# is DataGolf's GLOBAL universe and includes offshore books with no NC operation.
+REACHABLE_BOOK_COLS = ["draftkings", "fanduel", "betmgm", "caesars", "bet365",
+                       "williamhill"]
+
+
+def _best_american(book_odds: dict, *, reachable_only: bool = True):
     """Best price FOR THE BETTOR = highest American value.
 
     Correct across the sign boundary: +250 > +150 > -110 > -200 as integers, and
     a bigger American number is always a better payout. The prior version applied
     max() to raw STRINGS, so "-667" sorted above "+250" lexicographically and the
-    'best book' was frequently the worst price on the board."""
-    clean = {k: _am(v) for k, v in book_odds.items()}
+    'best book' was frequently the worst price on the board.
+
+    ── REACHABLE-ONLY BY DEFAULT (2026-08-06) ─────────────────────────────────
+    This searched DataGolf's full global book list, which includes unibet,
+    betcris, betonline, bovada, pointsbet and pinnacle — none of which operate in
+    North Carolina. Offshore books routinely post longer prices, so "best odds"
+    systematically selected AWAY from anything the user could actually bet.
+
+    Measured over the 1,022-row golf ledger on 2026-08-06:
+        60% of all logged bets sat at unreachable books
+        as reported          440-439  n=879  ROI +3.49%  z=+0.96
+        reachable books only 174-179  n=353  ROI +2.11%  z=+0.37
+    The model's apparent edge was substantially harvested from a price universe
+    the user has no access to. An edge you cannot execute is not an edge, and
+    quoting one invites taking a materially worse number elsewhere while
+    believing it is the same bet.
+
+    Pass reachable_only=False to see the global best — useful as market context
+    and for CLV, never as a bettable price.
+    """
+    cols = REACHABLE_BOOK_COLS if reachable_only else None
+    clean = {k: _am(v) for k, v in book_odds.items() if cols is None or k in cols}
     clean = {k: v for k, v in clean.items() if v is not None}
     if not clean:
         return None, None
@@ -1162,9 +1208,15 @@ def sync_matchup_odds(tour: str = "pga", market: str = "round_matchups"):
         dg_odds   = odds.get("datagolf", {})
         # Collect all book lines (everything except datagolf)
         book_lines = {k: v for k, v in odds.items() if k != "datagolf" and isinstance(v, dict)}
-        # Best book odds for each side (highest American = best value)
-        def best_book_odds(side):
-            vals = [(book, v.get(side)) for book, v in book_lines.items() if v.get(side)]
+        # Best book odds for each side (highest American = best value), restricted
+        # to books the user can actually bet. This is the path that feeds the whole
+        # matchup edge board, so it is where the unreachable-price leak did its
+        # damage: on 2026-08-06, 93 of 94 board edges were priced only at unibet /
+        # betcris / betonline / pinnacle / bovada. See _best_american's note for
+        # the measured effect on the historical ledger (+3.49% -> +2.11%).
+        def best_book_odds(side, *, reachable_only=True):
+            vals = [(book, v.get(side)) for book, v in book_lines.items()
+                    if v.get(side) and (not reachable_only or book in REACHABLE_BOOK_COLS)]
             if not vals: return None, None
             best = max(vals, key=lambda x: float(x[1]))
             return best[0], best[1]
