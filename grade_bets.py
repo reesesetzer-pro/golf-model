@@ -80,6 +80,83 @@ def find_event(tournament_name: str, bet_date_iso: str) -> Optional[dict]:
 _round_cache: dict = {}
 
 
+def live_completed_round_scores() -> tuple[dict[str, dict], int | None]:
+    """Per-round scores for a tournament IN PROGRESS, from DataGolf's live feed.
+
+    ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+    `fetch_event_rounds` reads DataGolf's HISTORICAL archive, which only
+    populates AFTER an event concludes. That is correct for tournament-total
+    bets, but it stalls ROUND matchups for up to four days: a Thursday R1 H2H
+    has a known outcome on Thursday night and sat "Pending" until Sunday.
+
+    Measured 2026-08-07 10:38 ET: 35 R1 H2H bets pending, while the live feed
+    already had R1 scores for **147 of 147 players** with `round: 2` underway.
+    Every one of those outcomes was known and none of them had been graded. The
+    model cannot learn from a bet it has not settled, so the learning loop was
+    idle for most of every tournament week.
+
+    Returns ({player_name_lower: {"r1":.., "r2":.., "r3":.., "r4":..}},
+             current_round). The live payload's `player_name` is already in the
+    same "Last, First" form the bets table uses.
+    """
+    try:
+        from round_status import live_round_status
+        live = live_round_status()
+    except Exception as exc:
+        print(f"  · live round feed unavailable ({type(exc).__name__}) — "
+              f"round matchups stay pending")
+        return {}, None
+    if not live:
+        return {}, None
+    out: dict[str, dict] = {}
+    rounds_seen: list[int] = []
+    for rec in live.values():
+        name = str(rec.get("player_name") or "").strip()
+        if not name:
+            continue
+        out[name.lower()] = {f"r{i}": rec.get(f"R{i}") for i in (1, 2, 3, 4)}
+        if isinstance(rec.get("round"), int):
+            rounds_seen.append(rec["round"])
+    current = max(rounds_seen) if rounds_seen else None
+    return out, current
+
+
+def round_is_complete(score_key: str, live_scores: dict, current_round: int | None) -> bool:
+    """True only when `score_key`'s round is FINISHED for the whole field.
+
+    Two independent conditions, both required — a round that is merely
+    *underway* must never grade, because a player who has posted 62 through 18
+    and one who is 7 holes in are not comparable.
+
+      1. the live feed's current round is strictly LATER than this one, and
+      2. essentially the entire field has a score for it (>=95%).
+
+    Condition 2 alone would be fooled by an early wave finishing; condition 1
+    alone would be fooled by a feed that advances its round counter at first
+    tee-time. Requiring both is what makes this safe to grade from.
+    """
+    if not score_key.startswith("r") or not live_scores:
+        return False
+    try:
+        rnd = int(score_key[1:])
+    except ValueError:
+        return False
+    if current_round is None or current_round <= rnd:
+        return False
+    have = sum(1 for v in live_scores.values() if v.get(score_key) is not None)
+    return bool(have) and have / len(live_scores) >= 0.95
+
+
+_LIVE_MEMO: dict = {}
+
+
+def _live_cache():
+    """Fetch the live feed at most once per run (it is one HTTP call for ~150 players)."""
+    if "v" not in _LIVE_MEMO:
+        _LIVE_MEMO["v"] = live_completed_round_scores()
+    return _LIVE_MEMO["v"]
+
+
 def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, dict]:
     """Return {player_name: {"total": int, "r1": int|None, "r2": ..., "r3": ..., "r4": ...}}.
 
@@ -253,6 +330,20 @@ def grade_one(bet: dict) -> Optional[str]:
         o_record = scores.get(opponent.lower()) or {}
         p_score = p_record.get(score_key)
         o_score = o_record.get(score_key)
+
+        # ── LIVE FALLBACK FOR A COMPLETED ROUND ────────────────────────────────
+        # The historical archive is empty until the event ends, but a ROUND
+        # matchup is decided the moment its round finishes. Fall back to the live
+        # feed for those, gated on round_is_complete() so an in-progress round can
+        # never grade. Tournament totals (score_key == "total") are deliberately
+        # NOT eligible — those genuinely need the event to conclude.
+        if score_key != "total" and (p_score is None or o_score is None):
+            live_scores, current_round = _live_cache()
+            if round_is_complete(score_key, live_scores, current_round):
+                lp = (live_scores.get(player.lower()) or {}).get(score_key)
+                lo = (live_scores.get(opponent.lower()) or {}).get(score_key)
+                if lp is not None and lo is not None:
+                    p_score, o_score = lp, lo
 
         # Missed cut handling: a player not in totals never made the cut → effectively a higher score
         if p_score is None and o_score is None:
