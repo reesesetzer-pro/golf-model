@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 from supabase import create_client, ClientOptions
 
-from golf_db import fetch_all
+from golf_db import SupabaseUnavailable, fetch_all, with_retry
 
 _WORKSPACE = Path(__file__).resolve().parent.parent
 if str(_WORKSPACE) not in sys.path:
@@ -56,10 +56,17 @@ _SCHEDULE_CACHE = None
 
 def _schedule() -> list:
     """The schedule table, fetched ONCE per run (was re-fetched on every find_event call,
-    i.e. per pending bet — the ReadTimeout culprit)."""
+    i.e. per pending bet — the ReadTimeout culprit).
+
+    Routed through fetch_all (2026-08-18) for two reasons: it inherits the
+    bounded connect retry that closes the 33-night golf-grade outage, and it
+    is the last plain `.select("*").execute()` left in this file — 47 rows
+    today, so not a live truncation, but the 1000-row cap this codebase has
+    already been bitten by four times is one busy season away.
+    """
     global _SCHEDULE_CACHE
     if _SCHEDULE_CACHE is None:
-        _SCHEDULE_CACHE = sb.table("schedule").select("*").execute().data or []
+        _SCHEDULE_CACHE = fetch_all(lambda: sb.table("schedule").select("*"))
     return _SCHEDULE_CACHE
 
 
@@ -504,10 +511,18 @@ def main():
         else:
             pnl = 0.0
 
-        sb.table("bets").update({
-            "result":      outcome,
-            "profit_loss": round(pnl, 2),
-        }).eq("id", bet["id"]).execute()
+        # Retried like the reads (2026-08-18): a transport fault on the write
+        # path used to abort the run mid-pass, leaving some bets settled and
+        # the rest Pending with a traceback as the only record. Safe to retry —
+        # it sets deterministic values on one row id, so re-applying it after
+        # an ambiguous connection failure lands exactly the same state.
+        with_retry(
+            lambda: sb.table("bets").update({
+                "result":      outcome,
+                "profit_loss": round(pnl, 2),
+            }).eq("id", bet["id"]).execute(),
+            what=f"settle bet id={bet['id']}",
+        )
         updated += 1
         print(f"  ✓ id={bet['id']} {bet.get('player_name')} {bet.get('market')} → {outcome}  (P/L: {pnl:+.2f})")
 
@@ -517,4 +532,21 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # ── FAIL LOUD, FAIL CLOSED (2026-08-18) ───────────────────────────────────
+    # Closes the "33 golf-grade runs died and nothing escalated it" finding
+    # (2026-07-03..2026-08-17; see golf_db.py for the measured fault shape).
+    # golf_db's bounded retry rides out a transient resolver; when it cannot,
+    # the run must end as an unmistakable one-line failure with a
+    # non-zero exit, NOT a 40-frame httpcore traceback whose last line is an
+    # errno. Exit 2 (distinct from an ordinary crash's 1) says specifically:
+    # the database was unreachable, zero bets were graded, this run produced
+    # nothing. Never downgrade this to exit 0 — a green step that graded
+    # nothing is precisely the defect class that hid this for six weeks.
+    try:
+        main()
+    except SupabaseUnavailable as exc:
+        print(f"\n!! golf-grade ABORTED — Supabase unreachable: {exc}",
+              file=sys.stderr, flush=True)
+        print("!! NOTHING WAS GRADED. This step did not run; treat any "
+              "downstream 'up to date' as stale.", file=sys.stderr, flush=True)
+        sys.exit(2)
