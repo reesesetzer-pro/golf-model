@@ -16,12 +16,46 @@ from __future__ import annotations
 import re
 import sys
 import time
-import requests
 from pathlib import Path
 from typing import Optional
-from supabase import create_client, ClientOptions
 
-from golf_db import SupabaseUnavailable, fetch_all, with_retry
+from golf_db import (
+    EXIT_DEPENDENCY_BROKEN,
+    EXIT_SUPABASE_UNAVAILABLE,
+    GolfDependencyBroken,
+    SupabaseUnavailable,
+    abort_summary,
+    diagnose_dependency_failure,
+    fetch_all,
+    with_retry,
+)
+
+# ── GUARDED THIRD-PARTY IMPORTS (2026-08-18) ──────────────────────────────────
+# The single largest golf-grade outage in the 2026-07-03..08-17 window did NOT
+# happen at a Supabase call — it happened HERE, on line ~20, 18 scheduled runs in
+# a row over 7 consecutive days (2026-07-25..07-31), because `cfbd==5.20.0`
+# (Requires-Dist: pydantic<2) had downgraded pydantic in the SHARED venv and
+# `postgrest/types.py` needs the v2-only `TypeAdapter`. An import-time crash is
+# upstream of every runtime handler, so the only artifact was a 6-frame
+# ImportError in a log nobody read. `pip check` still reports that conflict
+# today, so this WILL recur; catching it is how it announces itself next time.
+#
+# The failure is recorded rather than raised so the module stays IMPORTABLE:
+#   * `__main__` below can convert it into exit 3 (dependency) instead of an
+#     unhandled traceback that is indistinguishable from exit 1 "some crash";
+#   * library callers (scripts/scorecard.py imports this module) get a typed,
+#     self-describing error at first USE of `sb` rather than an AttributeError
+#     on a None, and their own guards can report it honestly.
+try:
+    import requests
+    from supabase import create_client, ClientOptions
+except ImportError as _import_exc:                      # pragma: no cover - see tests
+    _DEPENDENCY_ERROR: Optional[GolfDependencyBroken] = diagnose_dependency_failure(
+        _import_exc)
+    requests = None                                     # type: ignore[assignment]
+    create_client = ClientOptions = None                # type: ignore[assignment]
+else:
+    _DEPENDENCY_ERROR = None
 
 _WORKSPACE = Path(__file__).resolve().parent.parent
 if str(_WORKSPACE) not in sys.path:
@@ -39,15 +73,39 @@ def _dg_key():
     return get_secret("DG_API_KEY", required=True)
 
 
-SUPABASE_URL, SUPABASE_KEY = _load_secrets()
-DG_KEY = _dg_key()
 DG_BASE = "https://feeds.datagolf.com"
 
-# 60s postgrest timeout (default was too short for a slow Supabase) + the schedule
-# cache below stop golf-grade's ReadTimeout: find_event was re-fetching the FULL
-# schedule table once per pending bet (~280x/run). Now fetched once.
-sb = create_client(SUPABASE_URL, SUPABASE_KEY,
-                   options=ClientOptions(postgrest_client_timeout=60))
+
+class _DependencyBrokenClient:
+    """Stands in for `sb` when the import chain is broken.
+
+    Any attribute access re-raises the typed diagnosis, so a caller that reaches
+    for the database gets "your venv is broken, here is which package and how to
+    fix it" instead of `AttributeError: 'NoneType' object has no attribute
+    'table'`. Fails CLOSED — it can never return data.
+    """
+
+    def __init__(self, error: GolfDependencyBroken) -> None:
+        self._error = error
+
+    def __getattr__(self, name: str):
+        raise self._error
+
+
+if _DEPENDENCY_ERROR is None:
+    SUPABASE_URL, SUPABASE_KEY = _load_secrets()
+    DG_KEY = _dg_key()
+    # 60s postgrest timeout (default was too short for a slow Supabase) + the
+    # schedule cache below stop golf-grade's ReadTimeout: find_event was
+    # re-fetching the FULL schedule table once per pending bet (~280x/run).
+    # Now fetched once.
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY,
+                       options=ClientOptions(postgrest_client_timeout=60))
+else:
+    # Secrets are deliberately NOT loaded on this path: nothing can use them, and
+    # a missing-secret error here would mask the real (dependency) diagnosis.
+    SUPABASE_URL = SUPABASE_KEY = DG_KEY = ""
+    sb = _DependencyBrokenClient(_DEPENDENCY_ERROR)      # type: ignore[assignment]
 
 
 # ── Tournament/event resolution ───────────────────────────────────────────────
@@ -484,8 +542,19 @@ def _closing_clv(bet: dict) -> Optional[float]:
         return None
 
 
+# How far the run actually got, readable from the fail-loud handler below.
+# Module-level because the handler lives outside main()'s frame and the honest
+# abort message depends on whether any row was already committed.
+_RUN_STATE = {"pending": None, "settled": 0}
+
+
 def main():
+    if _DEPENDENCY_ERROR is not None:
+        # Fail fast and typed, before touching the network or the clock.
+        raise _DEPENDENCY_ERROR
+
     pending = fetch_all(lambda: sb.table("bets").select("*").eq("result", "Pending"))
+    _RUN_STATE["pending"] = len(pending)
     print(f"Pending bets: {len(pending)}")
 
     graded = updated = 0
@@ -524,6 +593,9 @@ def main():
             what=f"settle bet id={bet['id']}",
         )
         updated += 1
+        # Recorded per successful write, so an abort on the NEXT bet reports the
+        # rows that really landed instead of claiming nothing was graded.
+        _RUN_STATE["settled"] = updated
         print(f"  ✓ id={bet['id']} {bet.get('player_name')} {bet.get('market')} → {outcome}  (P/L: {pnl:+.2f})")
 
     clv_note = (f" | avg CLV {sum(clvs)/len(clvs):+.2f}% (n={len(clvs)})"
@@ -531,22 +603,56 @@ def main():
     print(f"\nGraded {graded}/{len(pending)} | Win/Loss/Push: {summary['Win']}/{summary['Loss']}/{summary['Push']} | Updated {updated} rows{clv_note}")
 
 
-if __name__ == "__main__":
-    # ── FAIL LOUD, FAIL CLOSED (2026-08-18) ───────────────────────────────────
-    # Closes the "33 golf-grade runs died and nothing escalated it" finding
-    # (2026-07-03..2026-08-17; see golf_db.py for the measured fault shape).
-    # golf_db's bounded retry rides out a transient resolver; when it cannot,
-    # the run must end as an unmistakable one-line failure with a
-    # non-zero exit, NOT a 40-frame httpcore traceback whose last line is an
-    # errno. Exit 2 (distinct from an ordinary crash's 1) says specifically:
-    # the database was unreachable, zero bets were graded, this run produced
-    # nothing. Never downgrade this to exit 0 — a green step that graded
-    # nothing is precisely the defect class that hid this for six weeks.
-    try:
-        main()
-    except SupabaseUnavailable as exc:
+def report_abort(exc: BaseException) -> int:
+    """Emit the fail-loud lines for `exc` and return the process exit code.
+
+    A named function rather than inline `__main__` code so the exact
+    operator-facing text is reachable from a test. The first cut buried it under
+    `if __name__ == "__main__"`, where its (false) unconditional "NOTHING WAS
+    GRADED" could not be regression-tested at all — verified by mutation: a
+    mutant that hard-coded `abort_summary(0, None)` there survived the suite.
+    """
+    if isinstance(exc, GolfDependencyBroken):
+        print(f"\n!! golf-grade ABORTED — broken Python environment: {exc}",
+              file=sys.stderr, flush=True)
+        print("!! NOTHING WAS GRADED, and this is NOT a network fault — no retry "
+              "will clear it. Every other script sharing this venv is likely "
+              "failing the same way right now.", file=sys.stderr, flush=True)
+        return EXIT_DEPENDENCY_BROKEN
+
+    if isinstance(exc, SupabaseUnavailable):
         print(f"\n!! golf-grade ABORTED — Supabase unreachable: {exc}",
               file=sys.stderr, flush=True)
-        print("!! NOTHING WAS GRADED. This step did not run; treat any "
-              "downstream 'up to date' as stale.", file=sys.stderr, flush=True)
-        sys.exit(2)
+        # Honest about partial progress: the write path is retried too, so an
+        # outage that begins mid-loop can leave rows already committed. Claiming
+        # "nothing was graded" there would send the operator looking for nothing
+        # while settled rows sit in `bets`.
+        print(f"!! {abort_summary(_RUN_STATE['settled'], _RUN_STATE['pending'])}",
+              file=sys.stderr, flush=True)
+        return EXIT_SUPABASE_UNAVAILABLE
+
+    raise exc       # not ours — never swallow it into a tidy exit code
+
+
+if __name__ == "__main__":
+    # ── FAIL LOUD, FAIL CLOSED (2026-08-18) ───────────────────────────────────
+    # Closes the "golf-grade died repeatedly and nothing escalated it" finding
+    # (31 failed runs, 2026-07-03..2026-08-17; see golf_db.py for the re-derived
+    # census). Whatever the fault, the run must end as an unmistakable one-line
+    # failure with a non-zero exit — NOT a 40-frame httpcore traceback whose
+    # last line is an errno, and NOT a 6-frame ImportError.
+    #
+    # The two exit codes are deliberately different because the two faults need
+    # different responses, and the log is the only place that distinction can
+    # survive:
+    #   3  the venv is broken (e.g. pydantic downgraded under supabase). Affects
+    #      every model sharing .venv; retrying will never fix it. 18 of the
+    #      window's 31 failures, all in one 7-day block.
+    #   2  Supabase was unreachable after the bounded retry. Network/infra, may
+    #      self-heal. 12 of the window's 31 failures.
+    # Never downgrade either to exit 0 — a green step that graded nothing is
+    # precisely the defect class that hid all of this for six weeks.
+    try:
+        main()
+    except (GolfDependencyBroken, SupabaseUnavailable) as exc:
+        sys.exit(report_abort(exc))
