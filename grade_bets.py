@@ -117,10 +117,19 @@ def _schedule() -> list:
     i.e. per pending bet — the ReadTimeout culprit).
 
     Routed through fetch_all (2026-08-18) for two reasons: it inherits the
-    bounded connect retry that closes the 33-night golf-grade outage, and it
-    is the last plain `.select("*").execute()` left in this file — 47 rows
-    today, so not a live truncation, but the 1000-row cap this codebase has
-    already been bitten by four times is one busy season away.
+    bounded connect retry, and it is the last plain `.select("*").execute()`
+    left in this file — 47 rows today, so not a live truncation, but the
+    1000-row cap this codebase has already been bitten by four times is one
+    busy season away.
+
+    CORRECTED 2026-08-19 (an earlier version of this docstring claimed the
+    retry "closes the 33-night golf-grade outage" — it does not). Re-derived
+    from ~/Library/Logs/betting-models/golf-grade-*.log, 2026-07-03..08-18:
+    136 runs, 102 succeeded, 34 failed. Of those 34, only **12** were the
+    DNS/ConnectError class the retry actually addresses. **18 were a separate
+    pydantic/ValidationError class** (and 4 other), which the retry does NOT
+    fix and which remains OPEN. Do not cite this retry as having closed the
+    outage; it closed one third of it.
     """
     global _SCHEDULE_CACHE
     if _SCHEDULE_CACHE is None:
