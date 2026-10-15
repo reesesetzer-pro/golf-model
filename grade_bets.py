@@ -280,9 +280,9 @@ def fetch_event_rounds(tour: str, event_id: int | str, year: int) -> dict[str, d
             r.raise_for_status()
             data = r.json()
             break
-        except requests.RequestException as e:
+        except requests.RequestException as e:  # never echo e: its text has the URL (&key=)
             if attempt == 2:
-                print(f"  ! DG rounds fetch failed for event={event_id}: {e}")
+                print(f"  ! DG rounds fetch failed for event={event_id}: {type(e).__name__} {getattr(e.response, 'status_code', '')}".rstrip())
                 _round_cache[cache_key] = {}
                 return {}
             time.sleep(5)

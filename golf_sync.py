@@ -127,12 +127,12 @@ def dg_get(endpoint: str, params: dict = {}):
                 continue
             if r.status_code == 400:
                 # Permanent client error — usually a stale event_id. Skip silently.
-                log.debug(f"DG 400 (skipping): {endpoint} {params}")
+                log.debug(f"DG 400 (skipping): {endpoint}")  # params carries the key
                 return None
             r.raise_for_status()
             return r.json()
-        except requests.RequestException as e:
-            log.error(f"DG request failed ({endpoint}): {e}")
+        except requests.RequestException as e:  # never echo e: its text has the URL (&key=)
+            log.error(f"DG request failed ({endpoint}): {type(e).__name__} {getattr(e.response, 'status_code', '')}".rstrip())
             if attempt < 2:
                 time.sleep(5)
     return None
@@ -148,8 +148,8 @@ def odds_get(endpoint: str, params: dict = {}):
         log.info(f"Odds API credits remaining: {remaining}")
         r.raise_for_status()
         return r.json()
-    except requests.RequestException as e:
-        log.error(f"Odds API request failed ({endpoint}): {e}")
+    except requests.RequestException as e:  # never echo e: its text has the URL (?apiKey=)
+        log.error(f"Odds API request failed ({endpoint}): {type(e).__name__} {getattr(e.response, 'status_code', '')}".rstrip())
         return None
 
 
